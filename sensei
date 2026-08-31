@@ -225,6 +225,68 @@ cmd_strip() {
   say "-> ${f%.log}.clean.txt"
 }
 
+# ── optional shell enhancement (NOT tmux — this touches your shell) ────────────
+# Fish-style autosuggestions: type, see a greyed completion from history, press
+# the right-arrow to accept. tmux can't do this (it's a shell feature), so this
+# sets it up for you. bash gets prefix history-search as a fallback. Opt-in only:
+# it never changes your login shell without asking.
+cmd_setup_shell() {
+  printf '\n  This configures your SHELL (not tmux) for live history autosuggestions.\n\n'
+
+  # bash: prefix history-search on up/down — works immediately, no packages
+  local br="$HOME/.bashrc"; touch "$br"
+  if ! grep -qsF 'history-search-backward' "$br"; then
+    {
+      printf '\n# tmux-sensei: type a few letters, press up-arrow to search history by prefix\n'
+      printf 'bind '"'"'"\\e[A": history-search-backward'"'"' 2>/dev/null\n'
+      printf 'bind '"'"'"\\e[B": history-search-forward'"'"' 2>/dev/null\n'
+    } >> "$br"
+    say "bash history-search added to ~/.bashrc (open a new bash shell to use it)"
+  else
+    say "bash history-search already set up"
+  fi
+
+  # zsh-autosuggestions: the real Fish-style ghost text
+  if ! command -v zsh >/dev/null 2>&1; then
+    printf '  For Fish-style ghost-text suggestions, install zsh:\n'
+    printf '    sudo apt install zsh zsh-autosuggestions   (Debian/Kali/Ubuntu)\n'
+    printf '    brew install zsh zsh-autosuggestions       (macOS)\n'
+    printf '  then re-run: sensei setup-shell\n\n'
+    return 0
+  fi
+
+  # find the plugin wherever the distro put it
+  local plug=""
+  for p in \
+    /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh \
+    /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh \
+    "$(brew --prefix 2>/dev/null)/share/zsh-autosuggestions/zsh-autosuggestions.zsh" \
+    "$HOME/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh"
+  do [ -f "$p" ] && { plug="$p"; break; }; done
+
+  if [ -z "$plug" ]; then
+    printf '  zsh is installed but the autosuggestions plugin is not. Install it:\n'
+    printf '    sudo apt install zsh-autosuggestions\n'
+    printf '  or:  git clone https://github.com/zsh-users/zsh-autosuggestions ~/.zsh/zsh-autosuggestions\n'
+    printf '  then re-run: sensei setup-shell\n\n'
+    return 0
+  fi
+
+  local zr="$HOME/.zshrc"; touch "$zr"
+  grep -qsF "$plug" "$zr" || {
+    printf '\n# tmux-sensei: Fish-style history autosuggestions (right-arrow to accept)\nsource %s\n' "$plug" >> "$zr"
+    say "zsh-autosuggestions wired into ~/.zshrc"
+  }
+
+  if [ "${SHELL##*/}" != "zsh" ]; then
+    printf '  zsh is ready but is not your login shell.\n'
+    printf '  Make it default:  chsh -s "%s"   (then log out/in)\n' "$(command -v zsh)"
+    printf '  Or just try it now:  exec zsh\n\n'
+  else
+    printf '  Done — open a new zsh shell (or run: exec zsh). Type, then press right-arrow.\n\n'
+  fi
+}
+
 # ── self-update ───────────────────────────────────────────────────────────────
 # Pulls the latest installer from the repo and runs it. The installer stages to
 # temp, swaps only what changed, and reloads a running tmux — so this is safe to
@@ -255,5 +317,6 @@ case "${1:-}" in
   save) shift; cmd_save "$@" ;;
   restore) shift; cmd_restore "$@" ;;
   strip) shift; cmd_strip "$@" ;;
+  setup-shell) cmd_setup_shell ;;
   *) sed -n '2,20p' "$0" ;;
 esac
