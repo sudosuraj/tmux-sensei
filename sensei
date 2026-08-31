@@ -24,13 +24,41 @@ say() { "${TM[@]}" display-message "  $*" 2>/dev/null || printf '%s\n' "$*"; }
 # ── vpn/iface indicator ───────────────────────────────────────────────────────
 # Shows the interface I'm actually attacking from. If this is blank and I'm
 # about to run something, that's the reminder I needed.
+# Shows EVERY attack-relevant interface, VPN/tunnels first (that's your attacker
+# IP), then the egress LAN IP dim. Screams red if no tunnel is up — a dropped VPN
+# mid-exam is a silent killer. Emits tmux #[...] style codes; the status bar
+# interprets them. `sensei vpn` = status readout · `sensei ip` = full popup list.
+_ip_tuns() { ip -4 -o addr show 2>/dev/null | awk '$2 ~ /^(tun|tap|wg|ppp)/ {split($4,a,"/"); print $2, a[1]}'; }
+_ip_lan()  { ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(tun|tap|wg|ppp|lo|docker|br-|veth)/ {split($4,a,"/"); print $2, a[1]; exit}'; }
+
 cmd_vpn() {
-  local i ip
-  for i in tun0 tun1 wg0 ppp0; do
-    ip=$(ip -4 -o addr show "$i" 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')
-    [ -n "${ip:-}" ] && { printf '%s %s' "$i" "$ip"; return; }
-  done
-  printf 'no-tun'
+  local out="" iface addr lan
+  while read -r iface addr; do
+    [ -n "$iface" ] && out="$out#[fg=colour107,bold]$iface #[fg=colour223]$addr#[default]  "
+  done < <(_ip_tuns)
+  [ -z "$out" ] && out="#[fg=colour203,bold]NO-VPN#[default]  "
+  lan=$(_ip_lan)
+  [ -n "$lan" ] && out="$out#[fg=colour244]${lan% *} ${lan#* }#[default]"
+  printf '%s' "$out"
+}
+
+# full-screen readout for a popup — plain text, big, copy-friendly
+cmd_ip() {
+  printf '  ATTACKER INTERFACES\n\n'
+  ip -4 -o addr show scope global 2>/dev/null \
+    | awk '{split($4,a,"/"); printf "    %-10s %s\n", $2, a[1]}'
+  local t; t=$(_ip_tuns | awk 'NR==1{print $2}')
+  printf '\n'
+  if [ -n "${t:-}" ]; then printf '  >> attacker IP (tun): %s\n' "$t"
+  else printf '  >> (!) NO VPN INTERFACE UP\n'; fi
+}
+
+# copy the tunnel IP to tmux buffer + system clipboard (OSC52) in one keystroke
+cmd_ipcopy() {
+  local ip; ip=$(_ip_tuns | awk 'NR==1{print $2}')
+  [ -n "${ip:-}" ] || { "${TM[@]}" display-message "  no VPN interface up"; return 1; }
+  printf '%s' "$ip" | "${TM[@]}" load-buffer -w -
+  "${TM[@]}" display-message "  attacker IP copied: $ip   (prefix ] to paste)"
 }
 
 # ── evidence logging ──────────────────────────────────────────────────────────
@@ -167,6 +195,8 @@ cmd_strip() {
 
 case "${1:-}" in
   vpn) cmd_vpn ;;
+  ip) cmd_ip ;;
+  ipcopy) cmd_ipcopy ;;
   log) shift; cmd_log "$@" ;;
   dump) shift; cmd_dump "$@" ;;
   notes) shift; cmd_notes "$@" ;;
