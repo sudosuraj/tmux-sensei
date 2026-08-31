@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# sensei — the only external dependency of tmux-sensei.conf
+# One script, POSIX-ish bash, no packages. Subcommands are called from keybinds
+# and hooks in the config; every one of them is safe to run by hand.
+#
+#   sensei vpn                      -> status-bar VPN/iface indicator
+#   sensei log toggle  <session>    -> arm/disarm evidence logging for a session
+#   sensei log inherit <session> <pane_id>
+#   sensei dump  <pane_id> <session>-> flush scrollback to the case file
+#   sensei notes <session>          -> open the case notebook
+#   sensei case  <name>             -> new session skeleton for a target
+#   sensei burst <session> <target> -> STAGE recon commands (never executes)
+#   sensei save [name] / restore [name]
+#   sensei strip <logfile>          -> ANSI-strip a log for reporting
+set -u
+TM=(${SENSEI_TMUX:-tmux})          # socket-aware: SENSEI_TMUX="tmux -L lab" for testing
+LOOT="${SENSEI_LOOT:-$HOME/loot}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/sensei"
+mkdir -p "$LOOT" "$STATE"
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+say() { "${TM[@]}" display-message "  $*" 2>/dev/null || printf '%s\n' "$*"; }
+
+# ── vpn/iface indicator ───────────────────────────────────────────────────────
+# Shows the interface I'm actually attacking from. If this is blank and I'm
+# about to run something, that's the reminder I needed.
+cmd_vpn() {
+  local i ip
+  for i in tun0 tun1 wg0 ppp0; do
+    ip=$(ip -4 -o addr show "$i" 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')
+    [ -n "${ip:-}" ] && { printf '%s %s' "$i" "$ip"; return; }
+  done
+  printf 'no-tun'
+}
+
+# ── evidence logging ──────────────────────────────────────────────────────────
+sess_dir() { printf '%s/%s' "$LOOT" "$1"; }
+
+log_arm_pane() {   # $1 session  $2 pane_id
+  local d ts f
+  d=$(sess_dir "$1"); mkdir -p "$d/panes"
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  f="$d/panes/${ts}_${2#%}.log"
+  "${TM[@]}" pipe-pane -t "$2" -o "cat >> '$f'"
+  printf '# session=%s pane=%s started=%s host=%s\n' "$1" "$2" "$ts" "$(hostname)" >> "$f"
+}
+
+cmd_log() {
+  local action="${1:-status}" sess="${2:-}" pane="${3:-}"
+  [ -n "$sess" ] || sess=$("${TM[@]}" display -p '#{session_name}')
+  local cur; cur=$("${TM[@]}" show -t "$sess" -v @log 2>/dev/null || true)
+  case "$action" in
+    toggle)
+      if [ -n "$cur" ]; then
+        "${TM[@]}" set -t "$sess" -u @log
+        while read -r p; do "${TM[@]}" pipe-pane -t "$p"; done < <("${TM[@]}" list-panes -s -t "$sess" -F '#{pane_id}')
+        say "logging OFF · $sess"
+      else
+        "${TM[@]}" set -t "$sess" @log 1
+        while read -r p; do log_arm_pane "$sess" "$p"; done < <("${TM[@]}" list-panes -s -t "$sess" -F '#{pane_id}')
+        say "logging ON  · $(sess_dir "$sess")/panes"
+      fi ;;
+    inherit) [ -n "$cur" ] && [ -n "$pane" ] && log_arm_pane "$sess" "$pane" ;;
+    status)  [ -n "$cur" ] && echo on || echo off ;;
+    *) die "log: toggle|inherit|status" ;;
+  esac
+}
+
+# ── scrollback -> case file ───────────────────────────────────────────────────
+cmd_dump() {
+  local pane="${1:?pane_id}" sess="${2:-$("${TM[@]}" display -p '#{session_name}')}"
+  local d f; d=$(sess_dir "$sess"); mkdir -p "$d/scrollback"
+  f="$d/scrollback/$(date -u +%Y%m%dT%H%M%SZ)_${pane#%}.txt"
+  "${TM[@]}" capture-pane -t "$pane" -p -S - -J > "$f"
+  say "dumped $(wc -l < "$f") lines -> $f"
+}
+
+# ── notebook ──────────────────────────────────────────────────────────────────
+cmd_notes() {
+  local sess="${1:?session}" d; d=$(sess_dir "$sess"); mkdir -p "$d"
+  [ -f "$d/notes.md" ] || {
+    printf '# %s\n\nopened: %s\nscope:\n  - \n\n## findings\n\n## loose ends\n\n' \
+      "$sess" "$(date -u +%F\ %TZ)" > "$d/notes.md"; }
+  exec "${EDITOR:-vi}" "$d/notes.md"
+}
+
+# ── case skeleton ─────────────────────────────────────────────────────────────
+# One session per target. Windows are named by phase, never auto-renamed.
+cmd_case() {
+  local name="${1:?case name}" d; d=$(sess_dir "$name")
+  mkdir -p "$d"/{panes,scrollback,evidence,tools-out}
+  if "${TM[@]}" has-session -t "=$name" 2>/dev/null; then "${TM[@]}" switch-client -t "=$name" 2>/dev/null; return; fi
+  "${TM[@]}" new-session  -d -s "$name" -n recon -c "$d"
+  "${TM[@]}" new-window   -t "=$name:" -n fuzz   -c "$d"
+  "${TM[@]}" new-window   -t "=$name:" -n shell  -c "$d"
+  "${TM[@]}" new-window   -t "=$name:" -n notes  -c "$d" "${EDITOR:-vi} '$d/notes.md'"
+  "${TM[@]}" set -t "=$name" @target "$name"
+  "${TM[@]}" select-window -t "=$name:recon"
+  "${TM[@]}" switch-client -t "=$name" 2>/dev/null || "${TM[@]}" attach -t "=$name"
+}
+
+# ── burst: STAGED recon, never executed ───────────────────────────────────────
+# This is the whole safety philosophy in one function. It types commands into
+# panes and stops. I read them, I fix the scope, I press Enter myself.
+cmd_burst() {
+  local sess="${1:?session}" tgt="${2:-}"
+  [ -n "$tgt" ] || die "no @target set (prefix t)"
+  local safe; safe=$(printf '%s' "$tgt" | tr './:' '-')      # dots break tmux -t
+  local w; w=$("${TM[@]}" new-window -P -F '#{window_id}' -t "=$sess:" -n "burst-$safe")
+  "${TM[@]}" split-window -t "$w" -h; "${TM[@]}" split-window -t "$w" -v
+  "${TM[@]}" select-pane  -t "$w".top-left; "${TM[@]}" split-window -t "$w" -v
+  "${TM[@]}" select-layout -t "$w" tiled
+  # collect the four pane_ids in order — targeting by %id never mis-parses
+  local ids; ids=$("${TM[@]}" list-panes -t "$w" -F '#{pane_id}')
+  local i=1 pid
+  for c in \
+    "subfinder -silent -d $tgt | anew subs.txt" \
+    "httpx -l subs.txt -sc -title -tech-detect -o http.txt" \
+    "nuclei -l http.txt -severity medium,high,critical -o nuclei.txt" \
+    "ffuf -u https://$tgt/FUZZ -w ~/wl/raft-small.txt -mc all -fc 404 -o ffuf.json"
+  do
+    pid=$(printf '%s\n' "$ids" | sed -n "${i}p")
+    [ -n "$pid" ] && "${TM[@]}" send-keys -t "$pid" "$c"     # <- no Enter. Deliberate.
+    i=$((i+1))
+  done
+  say "staged 4 commands for $tgt — read them before you run them"
+}
+
+# ── layout persistence (no resurrect plugin) ─────────────────────────
+# Fields are tab-separated (tmux emits a literal TAB in -F); window names with
+# dots are fine because we target by session:index, never by name.pane. Restores geometry + cwd only —
+# processes are deliberately NOT resurrected (I decide what re-runs on a target).
+cmd_save() {
+  local n="${1:-default}"; local f="$STATE/$n.layout"; : > "$f"
+  "${TM[@]}" list-panes -a -F '#{session_name}::#{window_index}::#{window_name}::#{pane_index}::#{pane_current_path}::#{window_layout}' >> "$f"
+  say "saved $(wc -l < "$f") panes -> $f"
+}
+cmd_restore() {
+  local n="${1:-default}"; local f="$STATE/$n.layout"; [ -f "$f" ] || die "no snapshot: $f"
+  local s w wn p path lay
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    s=${line%%::*};        line=${line#*::}
+    w=${line%%::*};        line=${line#*::}
+    wn=${line%%::*};       line=${line#*::}
+    p=${line%%::*};        line=${line#*::}
+    path=${line%%::*};     line=${line#*::}
+    lay=$line
+    [ -n "${s:-}" ] || continue
+    "${TM[@]}" has-session -t "=$s" 2>/dev/null || "${TM[@]}" new-session -d -s "$s" -n "$wn" -c "$path"
+    "${TM[@]}" list-windows -t "=$s" -F '#{window_index}' | grep -qx "$w" \
+      || "${TM[@]}" new-window -d -t "=$s:$w" -n "$wn" -c "$path"
+    [ "$p" = "1" ] || "${TM[@]}" split-window -d -t "=$s:$w" -c "$path"
+    "${TM[@]}" select-layout -t "=$s:$w" "$lay" 2>/dev/null
+  done < "$f"
+  say "restored $n (layout + cwd only — processes are not resurrected)"
+}
+
+# ── log hygiene ───────────────────────────────────────────────────────────────
+cmd_strip() {
+  local f="${1:?logfile}"
+  sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g' -e 's/\x1b\][^\x07]*\x07//g' -e 's/\r$//' "$f" \
+    > "${f%.log}.clean.txt"
+  say "-> ${f%.log}.clean.txt"
+}
+
+case "${1:-}" in
+  vpn) cmd_vpn ;;
+  log) shift; cmd_log "$@" ;;
+  dump) shift; cmd_dump "$@" ;;
+  notes) shift; cmd_notes "$@" ;;
+  case) shift; cmd_case "$@" ;;
+  burst) shift; cmd_burst "$@" ;;
+  save) shift; cmd_save "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  strip) shift; cmd_strip "$@" ;;
+  *) sed -n '2,20p' "$0" ;;
+esac
