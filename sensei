@@ -17,6 +17,8 @@ TM=(${SENSEI_TMUX:-tmux})          # socket-aware: SENSEI_TMUX="tmux -L lab" for
 LOOT="${SENSEI_LOOT:-$HOME/loot}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/sensei"
 mkdir -p "$LOOT" "$STATE"
+SENSEI_REPO="${SENSEI_REPO:-sudosuraj/tmux-sensei}"
+SENSEI_BRANCH="${SENSEI_BRANCH:-main}"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 say() { "${TM[@]}" display-message "  $*" 2>/dev/null || printf '%s\n' "$*"; }
@@ -193,7 +195,23 @@ cmd_strip() {
   say "-> ${f%.log}.clean.txt"
 }
 
+# ── self-update ───────────────────────────────────────────────────────────────
+# Pulls the latest installer from the repo and runs it. The installer stages to
+# temp, swaps only what changed, and reloads a running tmux — so this is safe to
+# run mid-session. Honors SENSEI_REPO / SENSEI_BRANCH.
+cmd_update() {
+  local url="https://raw.githubusercontent.com/${SENSEI_REPO}/${SENSEI_BRANCH}/install.sh"
+  local dl
+  if command -v curl >/dev/null 2>&1; then dl="curl -fsSL";
+  elif command -v wget >/dev/null 2>&1; then dl="wget -qO-";
+  else die "need curl or wget to update"; fi
+  printf 'updating tmux-sensei from %s (%s)...\n' "$SENSEI_REPO" "$SENSEI_BRANCH"
+  $dl "$url" | SENSEI_REPO="$SENSEI_REPO" SENSEI_BRANCH="$SENSEI_BRANCH" bash \
+    || die "update failed — check network and that $SENSEI_REPO is reachable"
+}
+
 case "${1:-}" in
+  update) cmd_update ;;
   vpn) cmd_vpn ;;
   ip) cmd_ip ;;
   ipcopy) cmd_ipcopy ;;
