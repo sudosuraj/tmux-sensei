@@ -32,6 +32,24 @@ say() { "${TM[@]}" display-message "  $*" 2>/dev/null || printf '%s\n' "$*"; }
 # interprets them. `sensei vpn` = status readout · `sensei ip` = full popup list.
 _ip_tuns() { ip -4 -o addr show 2>/dev/null | awk '$2 ~ /^(tun|tap|wg|ppp)/ {split($4,a,"/"); print $2, a[1]}'; }
 _ip_lan()  { ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(tun|tap|wg|ppp|lo|docker|br-|veth)/ {split($4,a,"/"); print $2, a[1]; exit}'; }
+_ip_all()  { ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print $2, a[1]}'; }
+
+# robust clipboard: copy to the real OS clipboard via whatever tool exists, AND
+# to the tmux buffer (+OSC52) so paste works inside tmux and over SSH. Text comes
+# from args ("sensei clip 10.10.14.7") or stdin (used by mouse copy-pipe).
+cmd_clip() {
+  local data
+  if [ "$#" -gt 0 ]; then data="$*"; else data="$(cat)"; fi
+  [ -n "$data" ] || return 0
+  if   command -v wl-copy >/dev/null 2>&1; then printf '%s' "$data" | wl-copy >/dev/null 2>&1
+  elif command -v xclip   >/dev/null 2>&1; then printf '%s' "$data" | xclip -selection clipboard >/dev/null 2>&1
+  elif command -v xsel    >/dev/null 2>&1; then printf '%s' "$data" | xsel  --clipboard --input   >/dev/null 2>&1
+  elif command -v pbcopy  >/dev/null 2>&1; then printf '%s' "$data" | pbcopy >/dev/null 2>&1
+  fi
+  printf '%s' "$data" | "${TM[@]}" load-buffer -w - >/dev/null 2>&1 || true
+  local show; show=$(printf '%s' "$data" | head -c 40)
+  "${TM[@]}" display-message "  copied: $show" 2>/dev/null || true
+}
 
 cmd_vpn() {
   local out="" iface addr lan
@@ -55,12 +73,24 @@ cmd_ip() {
   else printf '  >> (!) NO VPN INTERFACE UP\n'; fi
 }
 
-# copy the tunnel IP to tmux buffer + system clipboard (OSC52) in one keystroke
+# one keystroke: copy the tunnel (attacker) IP to the OS clipboard
 cmd_ipcopy() {
   local ip; ip=$(_ip_tuns | awk 'NR==1{print $2}')
   [ -n "${ip:-}" ] || { "${TM[@]}" display-message "  no VPN interface up"; return 1; }
-  printf '%s' "$ip" | "${TM[@]}" load-buffer -w -
-  "${TM[@]}" display-message "  attacker IP copied: $ip   (prefix ] to paste)"
+  cmd_clip "$ip"
+}
+
+# clickable menu of every IP — click a line (or press its number) to copy that IP
+cmd_ipmenu() {
+  local i=1 iface addr
+  local -a menu=()
+  while read -r iface addr; do
+    [ -n "$iface" ] || continue
+    menu+=( "$iface   $addr" "$i" "run-shell 'sensei clip $addr'" )
+    i=$((i+1))
+  done < <(_ip_all)
+  [ "${#menu[@]}" -gt 0 ] || { "${TM[@]}" display-message "  no IPs found"; return 1; }
+  "${TM[@]}" display-menu -T "#[align=centre]click an IP to copy" -x C -y C "${menu[@]}"
 }
 
 # ── evidence logging ──────────────────────────────────────────────────────────
@@ -215,6 +245,8 @@ case "${1:-}" in
   vpn) cmd_vpn ;;
   ip) cmd_ip ;;
   ipcopy) cmd_ipcopy ;;
+  ipmenu) cmd_ipmenu ;;
+  clip) shift; cmd_clip "$@" ;;
   log) shift; cmd_log "$@" ;;
   dump) shift; cmd_dump "$@" ;;
   notes) shift; cmd_notes "$@" ;;
