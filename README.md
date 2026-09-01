@@ -61,6 +61,7 @@ I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and 
 | `install.sh` / `uninstall.sh` | — | setup / teardown |
 | `local.conf` | `~/.config/tmux/local.conf` | **your** machine-local overrides (created empty, never overwritten) |
 | `burst.conf` | `~/.config/tmux/burst.conf` | **your** recon chains for `sensei burst` (created with no active profile, never overwritten) |
+| — | `~/.config/tmux/local.d/*.conf` | **your** one-file-per-idea experiments (not created by install — `sensei experiment <name>` scaffolds one) |
 
 ---
 
@@ -215,6 +216,16 @@ Add your own **grep-layer hunts**: copy one of the `bind -T copy-mode-vi M-… s
 Add your own **modal keys**: extend the `bind -T sensei …` block. End each binding with `switch-client -T sensei` if you want the layer to stay open after the key.
 
 Reload after any change with **`C-s R`**, or `C-s E` to open the config in an editor and reload on save.
+
+### Experimenting without breaking anything
+
+Three different tools for three different amounts of commitment:
+
+- **`:` (tmux's own command prompt)** — try any tmux command live, right now, no file touched at all. Reload wipes it away automatically. This is where "does this even work" questions belong before they're worth writing down anywhere.
+- **`sensei experiment <name>`** — for the idea that survived the `:` test and you want to live with for a while. Scaffolds `~/.config/tmux/local.d/<name>.conf` and opens it; `local.d/*.conf` is auto-sourced (in filename order) after `local.conf`. One file per idea instead of one growing pile in `local.conf` — reorder, disable (rename off the `.conf` extension), or `rm` an idea without touching anything else.
+- **`local.conf`** — once something's proven itself, that's where it belongs permanently.
+
+One honest caveat, because tmux's reload semantics deserve to be stated precisely rather than glossed over: deleting a `local.d/` file and reloading correctly reverts any `set`/`setw` **option** it changed, because this config's own defaults unconditionally re-run on every reload and just get sourced again with nothing left to override them — verified this directly. A `bind`/`bind -n` **key**, though, does not auto-revert: `source-file` re-applies commands, it doesn't reset state first, so a binding an experiment added stays bound after you delete the file, until you `unbind` it yourself or restart the server. That's standard tmux behavior, not a sensei limitation — if an experiment adds a key you might want to remove later, `unbind` it in the same file before deleting.
 
 ---
 

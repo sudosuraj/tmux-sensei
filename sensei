@@ -15,6 +15,7 @@
 #   sensei bufmenu                  -> numbered paste-buffer pick-list
 #   sensei findall <session> <pat>  -> grep every pane's scrollback, pick-list of hits
 #   sensei cmdtime <pane_id> <cmd>  -> elapsed time for the pane border
+#   sensei experiment <name>        -> scaffold + open a local.d/ drop-in snippet
 set -u
 TM=(${SENSEI_TMUX:-tmux})          # socket-aware: SENSEI_TMUX="tmux -L lab" for testing
 LOOT="${SENSEI_LOOT:-$HOME/loot}"
@@ -416,6 +417,25 @@ cmd_strip() {
   say "-> ${f%.log}.clean.txt"
 }
 
+# ── one-file-per-idea experiments ───────────────────────────────────────────────
+# Scaffolds a new drop-in snippet in local.d/ (see tmux-sensei.conf section 10)
+# and opens it. No keybind on purpose — this is a "type it in a shell" action,
+# same as setup-shell, not something you reach for mid-session.
+cmd_experiment() {
+  local name="${1:?experiment name}"; no_traversal "$name"
+  local d="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/local.d" f
+  mkdir -p "$d"
+  f="$d/$name.conf"
+  if [ -f "$f" ]; then
+    say "already exists, opening: $f"
+  else
+    printf '# experiment: %s (created %s)\n# delete this file any time — nothing else depends on it. If it binds a\n# key, `unbind` it here before deleting: reload re-applies commands, it\n# does not reset state, so a stray `bind` outlives the file that added it\n# (a `set`/`setw` OPTION reverts fine on its own — this only affects binds).\n\n' \
+      "$name" "$(date -u +%F)" > "$f"
+    say "created $f — edit it, C-s R to try it live"
+  fi
+  exec "${EDITOR:-vi}" "$f"
+}
+
 # ── optional shell enhancement (NOT tmux — this touches your shell) ────────────
 # Fish-style autosuggestions: type, see a greyed completion from history, press
 # the right-arrow to accept. tmux can't do this (it's a shell feature), so this
@@ -603,6 +623,7 @@ case "${1:-}" in
   restore) shift; cmd_restore "$@" ;;
   strip) shift; cmd_strip "$@" ;;
   setup-shell) cmd_setup_shell ;;
+  experiment) shift; cmd_experiment "$@" ;;
   help) cmd_help ;;
   *) sed -n '2,20p' "$0" ;;
 esac
