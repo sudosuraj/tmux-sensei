@@ -60,6 +60,7 @@ I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and 
 | `lab.conf` | `~/.config/tmux/lab.conf` | the experiment socket |
 | `install.sh` / `uninstall.sh` | — | setup / teardown |
 | `local.conf` | `~/.config/tmux/local.conf` | **your** machine-local overrides (created empty, never overwritten) |
+| `burst.conf` | `~/.config/tmux/burst.conf` | **your** recon chains for `sensei burst` (created with no active profile, never overwritten) |
 
 ---
 
@@ -127,7 +128,7 @@ Every subcommand is safe to run by hand; the config just binds keys to them. Evi
 sensei case <name>            new session: recon / fuzz / shell / notes windows + a loot dir
 sensei log toggle <sess>      arm / disarm per-session evidence logging (retro-fits every pane)
 sensei dump <pane> <sess>     flush a pane's scrollback into the case dir
-sensei burst <sess> <target>  STAGE subfinder → httpx → nuclei → ffuf across 4 panes — no Enter
+sensei burst <sess> <target> [profile]   STAGE a chain from burst.conf into N tiled panes — no Enter
 sensei notes <sess>           open the case notebook (notes.md)
 sensei save   [name]          snapshot layout + cwd of every session
 sensei restore [name]         rebuild that layout (geometry + cwd only — processes are NOT re-run)
@@ -137,16 +138,22 @@ sensei vpn                    the tun/wg indicator shown in the status bar
 
 ### `sensei burst` — the whole safety philosophy in one command
 
-`C-s t` sets a target; `C-s T` opens a tiled window and **types** a recon chain into four panes:
+`C-s t` sets a target; `C-s T` opens a tiled window and **types** a recon chain into as many panes as the chain has commands. sensei ships **no opinion about which tools you run** — the chain lives entirely in `~/.config/tmux/burst.conf`, which installs with no active profile, as named `[profile]` sections:
 
 ```
-subfinder -silent -d TARGET | anew subs.txt
+[web]
+subfinder -silent -d {target} | anew subs.txt
 httpx -l subs.txt -sc -title -tech-detect -o http.txt
 nuclei -l http.txt -severity medium,high,critical -o nuclei.txt
-ffuf -u https://TARGET/FUZZ -w ~/wl/raft-small.txt -mc all -fc 404 -o ffuf.json
+ffuf -u https://{target}/FUZZ -w ~/wl/raft-small.txt -mc all -fc 404 -o ffuf.json
+
+[ad]
+nmap -sC -sV -oA nmap-{target} {target}
+netexec smb {target} -u '' -p '' --shares
+enum4linux-ng -A {target}
 ```
 
-…and stops. Nothing runs. You read each command, fix the scope, and press Enter yourself. That's the point: the tool will lay the work out for you but will never fire a scan at a target because you fat-fingered a keybind.
+`{target}` is substituted with your `@target`; one pane opens per line, so an internal-AD chain and a five-tool web chain each get exactly the number of panes they need. Define one profile and `T` runs it directly; define several and `T` pops a pick-list so you choose per engagement instead of the tool guessing. And it **stops**. Nothing runs. You read each command, fix the scope, and press Enter yourself — the tool lays the work out for you but will never fire a scan at a target because you fat-fingered a keybind, or because it assumed you're doing a bug bounty when you're actually on an internal AD box.
 
 ---
 
@@ -183,7 +190,7 @@ set -ga terminal-overrides ',*256col*:Tc'
 set -g status-style 'bg=colour236,fg=colour250'
 ```
 
-Change the **staged recon chain** to match your own workflow: edit the `for c in …` list inside `cmd_burst()` in the `sensei` script. Same shape — one quoted command per pane, and **never add a trailing `\n` / `Enter`** unless you want to throw away Law #3.
+Change the **staged recon chain(s)** to match your own workflow: edit `~/.config/tmux/burst.conf`, not the script. Add or edit a `[profile]` section, one command per line, `{target}` where the target goes — the script never needs touching, and **never put a literal Enter/newline mid-command** unless you want to throw away Law #3. Override the file location entirely with `SENSEI_BURST_CONF=/path/to/file`.
 
 Add your own **grep-layer hunts**: copy one of the `bind -T copy-mode-vi M-… search-backward '…'` lines in `tmux-sensei.conf` and swap the regex (tmux search is case-sensitive, so bake case into the pattern).
 

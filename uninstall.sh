@@ -16,7 +16,7 @@ else
   rm -f "$CFG_DIR/tmux.conf"; c 32 "  ✓ removed tmux.conf"
 fi
 
-c 33 "  ! left in place: $CFG_DIR/local.conf and ~/loot (your overrides + evidence)"
+c 33 "  ! left in place: $CFG_DIR/local.conf, $CFG_DIR/burst.conf and ~/loot (your overrides + evidence)"
 c 33 "  ! remove the 'stty -ixon' / PATH lines from your shell rc by hand if you want them gone"
 c 32 "tmux-sensei uninstalled."
 if pgrep -x tmux >/dev/null 2>&1; then

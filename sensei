@@ -9,13 +9,14 @@
 #   sensei dump  <pane_id> <session>-> flush scrollback to the case file
 #   sensei notes <session>          -> open the case notebook
 #   sensei case  <name>             -> new session skeleton for a target
-#   sensei burst <session> <target> -> STAGE recon commands (never executes)
+#   sensei burst <session> <target> [profile] -> STAGE a chain from burst.conf (never executes)
 #   sensei save [name] / restore [name]
 #   sensei strip <logfile>          -> ANSI-strip a log for reporting
 set -u
 TM=(${SENSEI_TMUX:-tmux})          # socket-aware: SENSEI_TMUX="tmux -L lab" for testing
 LOOT="${SENSEI_LOOT:-$HOME/loot}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/sensei"
+BURST_CONF="${SENSEI_BURST_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux/burst.conf}"
 mkdir -p "$LOOT" "$STATE"
 SENSEI_REPO="${SENSEI_REPO:-sudosuraj/tmux-sensei}"
 SENSEI_BRANCH="${SENSEI_BRANCH:-main}"
@@ -162,30 +163,71 @@ cmd_case() {
 }
 
 # ── burst: STAGED recon, never executed ───────────────────────────────────────
-# This is the whole safety philosophy in one function. It types commands into
-# panes and stops. I read them, I fix the scope, I press Enter myself.
+# The whole safety philosophy in one function: it types commands into panes
+# and stops. I read them, I fix the scope, I press Enter myself.
+#
+# sensei ships no opinion about which tools you run — the chain(s) live entirely
+# in burst.conf (created empty on install, never touched by updates), as one or
+# more named [profile] sections, one command per line, {target} substituted in.
+# Pane count is however many lines the chosen profile has — nothing is fixed.
+burst_profile_names() {
+  awk -F'[][]' '/^\[.+\][ \t]*$/{print $2}' "$BURST_CONF" 2>/dev/null
+}
+burst_profile_commands() {   # $1 = profile name
+  awk -v want="$1" '
+    /^\[.+\][ \t]*$/ { name=$0; gsub(/^\[|\][ \t]*$/,"",name); on=(name==want); next }
+    on && NF && $0 !~ /^[ \t]*#/ { print }
+  ' "$BURST_CONF" 2>/dev/null
+}
+
 cmd_burst() {
-  local sess="${1:?session}" tgt="${2:-}"
+  local sess="${1:?session}" tgt="${2:-}" profile="${3:-}"
   [ -n "$tgt" ] || die "no @target set (prefix t)"
+  [ -f "$BURST_CONF" ] || die "no burst profiles yet — add a [profile] section to $BURST_CONF (see README)"
+
+  local -a profiles=()
+  while IFS= read -r p; do [ -n "$p" ] && profiles+=("$p"); done < <(burst_profile_names)
+  [ "${#profiles[@]}" -gt 0 ] || die "no [profile] sections found in $BURST_CONF — see README for the format"
+
+  if [ -z "$profile" ]; then
+    if [ "${#profiles[@]}" -eq 1 ]; then
+      profile="${profiles[0]}"
+    else
+      local i=1 p; local -a menu=()
+      for p in "${profiles[@]}"; do
+        menu+=( "$p" "$i" "run-shell 'sensei burst \"$sess\" \"$tgt\" \"$p\"'" )
+        i=$((i+1))
+      done
+      "${TM[@]}" display-menu -T "#[align=centre]burst profile for $tgt" -x C -y C "${menu[@]}"
+      return
+    fi
+  fi
+
+  local -a cmds=()
+  while IFS= read -r line; do cmds+=("$line"); done < <(burst_profile_commands "$profile")
+  [ "${#cmds[@]}" -gt 0 ] || die "profile '$profile' is empty or missing in $BURST_CONF"
+
   local safe; safe=$(printf '%s' "$tgt" | tr './:' '-')      # dots break tmux -t
   local w; w=$("${TM[@]}" new-window -P -F '#{window_id}' -t "=$sess:" -n "burst-$safe")
-  "${TM[@]}" split-window -t "$w" -h; "${TM[@]}" split-window -t "$w" -v
-  "${TM[@]}" select-pane  -t "$w".top-left; "${TM[@]}" split-window -t "$w" -v
+  local n="${#cmds[@]}" i
+  for ((i = 1; i < n; i++)); do "${TM[@]}" split-window -t "$w"; done
   "${TM[@]}" select-layout -t "$w" tiled
-  # collect the four pane_ids in order — targeting by %id never mis-parses
+  # collect the pane_ids in order — targeting by %id never mis-parses
   local ids; ids=$("${TM[@]}" list-panes -t "$w" -F '#{pane_id}')
-  local i=1 pid
-  for c in \
-    "subfinder -silent -d $tgt | anew subs.txt" \
-    "httpx -l subs.txt -sc -title -tech-detect -o http.txt" \
-    "nuclei -l http.txt -severity medium,high,critical -o nuclei.txt" \
-    "ffuf -u https://$tgt/FUZZ -w ~/wl/raft-small.txt -mc all -fc 404 -o ffuf.json"
-  do
-    pid=$(printf '%s\n' "$ids" | sed -n "${i}p")
-    [ -n "$pid" ] && "${TM[@]}" send-keys -t "$pid" "$c"     # <- no Enter. Deliberate.
+  i=1
+  for c in "${cmds[@]}"; do
+    local rendered="${c//\{target\}/$tgt}"
+    local pid; pid=$(printf '%s\n' "$ids" | sed -n "${i}p")
+    if [ -n "$pid" ]; then
+      # a just-split pane can land in copy-mode (e.g. the after-split-window
+      # log-inherit hook races with it) — cancel any mode first or these keys
+      # get read as copy-mode navigation instead of typed text and vanish
+      "${TM[@]}" send-keys -t "$pid" -X cancel 2>/dev/null
+      "${TM[@]}" send-keys -t "$pid" "$rendered"   # <- no Enter. Deliberate.
+    fi
     i=$((i+1))
   done
-  say "staged 4 commands for $tgt — read them before you run them"
+  say "staged $n commands ('$profile') for $tgt — read them before you run them"
 }
 
 # ── layout persistence (no resurrect plugin) ─────────────────────────
