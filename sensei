@@ -158,18 +158,29 @@ cmd_bufmenu() {
 # ── cross-pane search ──────────────────────────────────────────────────────────
 # Copy-mode's grep-layer (M-i/M-t/etc) only searches the pane you're already in.
 # When you're 8 panes deep this answers "which pane had that IP/error" instead
-# of you tabbing through each one by hand — greps every pane's full scrollback
-# and hands you a pick-list of which panes matched.
+# of you tabbing through each one by hand — greps every pane's scrollback and
+# hands you a pick-list of which panes matched.
+#
+# Capped to the last SENSEI_FINDALL_LINES lines per pane (default 5000), not
+# the full history — history-limit is 200000, and a pane that's been running
+# a long burst really can hold that much. Full-history grep on every pane in
+# a busy session would mean a real, felt pause every time you press F, for
+# scrollback that's realistically almost always near the tail anyway. Set
+# SENSEI_FINDALL_LINES=0 for the old unbounded behavior when you actually
+# need to search that far back.
 cmd_findall() {
   local sess="${1:?session}" pattern="${2:?pattern}"
+  local lines="${SENSEI_FINDALL_LINES:-5000}"
+  local -a cap=(-S -)
+  [ "$lines" != "0" ] && cap=(-S "-$lines")
   local -a matches=()
   local pid count
   while read -r pid; do
     [ -n "$pid" ] || continue
-    count=$("${TM[@]}" capture-pane -t "$pid" -p -S - -J 2>/dev/null | grep -Ec -- "$pattern" 2>/dev/null)
+    count=$("${TM[@]}" capture-pane -t "$pid" -p "${cap[@]}" -J 2>/dev/null | grep -Ec -- "$pattern" 2>/dev/null)
     [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null && matches+=("${pid}|${count}")
   done < <("${TM[@]}" list-panes -s -t "$sess" -F '#{pane_id}' 2>/dev/null)
-  [ "${#matches[@]}" -gt 0 ] || { say "no matches for: $pattern"; return 1; }
+  [ "${#matches[@]}" -gt 0 ] || { say "no matches for: $pattern (last $lines lines/pane — SENSEI_FINDALL_LINES=0 to search everything)"; return 1; }
   local i=1 m pid2 cnt2
   local -a menu=()
   for m in "${matches[@]}"; do

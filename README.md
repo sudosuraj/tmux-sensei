@@ -141,7 +141,7 @@ sensei restore [name]         rebuild that layout (geometry + cwd only — proce
 sensei strip <logfile>        ANSI-strip a log for a report
 sensei vpn                    the tun/wg indicator shown in the status bar (also fires an alert on drop)
 sensei bufmenu                numbered pick-list of the last 9 copied buffers, with a preview
-sensei findall <sess> <pat>   grep every pane's scrollback in a session, pick-list of the hits
+sensei findall <sess> <pat>   grep the last 5000 lines/pane (SENSEI_FINDALL_LINES=0 for everything)
 ```
 
 ### `sensei burst` — the whole safety philosophy in one command
