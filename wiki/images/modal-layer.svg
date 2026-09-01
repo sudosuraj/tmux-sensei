@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">
+  <rect width="900" height="300" fill="#1a1a1a"/>
+
+  <text x="20" y="28" fill="#8a8a8a" font-size="14" font-weight="bold">Before: C-s Space pressed</text>
+  <rect x="0" y="40" width="900" height="24" fill="#262626"/>
+  <text x="10" y="57" font-size="13">
+    <tspan fill="#444444">   </tspan>
+    <tspan fill="#87afaf" font-weight="bold">sensei</tspan>
+    <tspan fill="#8a8a8a"> recon-window </tspan>
+    <tspan fill="#444444">|</tspan>
+    <tspan fill="#8a8a8a"> kali</tspan>
+  </text>
+  <text x="890" y="57" font-size="13" text-anchor="end" fill="#8a8a8a">21:04</text>
+
+  <text x="20" y="110" fill="#8a8a8a" font-size="14" font-weight="bold">After: C-s Space pressed — layer is STICKY until Esc</text>
+  <rect x="0" y="122" width="900" height="24" fill="#262626"/>
+  <!-- reverse-video MODAL tag -->
+  <rect x="4" y="122" width="70" height="24" fill="#ffaf00"/>
+  <text x="39" y="139" font-size="13" text-anchor="middle" fill="#1a1a1a" font-weight="bold">MODAL</text>
+  <text x="80" y="139" font-size="13">
+    <tspan fill="#87afaf" font-weight="bold">sensei</tspan>
+    <tspan fill="#8a8a8a"> recon-window </tspan>
+    <tspan fill="#444444">|</tspan>
+    <tspan fill="#8a8a8a"> kali</tspan>
+  </text>
+  <text x="890" y="139" font-size="13" text-anchor="end" fill="#8a8a8a">21:04</text>
+
+  <text x="20" y="185" fill="#8a8a8a" font-size="14">Now h j k l move panes, x kills the pane you're on (no confirm) — not</text>
+  <text x="20" y="207" fill="#8a8a8a" font-size="14">letters typed into the shell. The reverse-video tag is the whole point:</text>
+  <text x="20" y="229" fill="#8a8a8a" font-size="14">you can't forget you're in here and fat-finger a kill-pane.</text>
+  <text x="20" y="265" fill="#808080" font-size="13">Esc or q leaves the layer and the tag disappears immediately.</text>
+</svg>

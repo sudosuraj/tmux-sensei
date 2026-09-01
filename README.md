@@ -5,6 +5,10 @@
   No plugin manager · no patched font · no <code>curl | bash</code> in the config itself · two files and one auditable script.
 </p>
 
+<p align="center">
+  📖 <a href="wiki/tmux-sensei-blog.md">Read the full walkthrough</a> — every feature explained in plain language, with screenshots.
+</p>
+
 ---
 
 ## Install

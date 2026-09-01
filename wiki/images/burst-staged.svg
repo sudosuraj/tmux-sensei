@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">
+  <rect width="900" height="400" rx="10" fill="#1a1a1a"/>
+  <rect x="0" y="0" width="900" height="28" rx="10" fill="#2b2b2b"/>
+  <circle cx="20" cy="14" r="6" fill="#ff5f57"/>
+  <circle cx="40" cy="14" r="6" fill="#febc2e"/>
+  <circle cx="60" cy="14" r="6" fill="#28c840"/>
+  <text x="450" y="19" fill="#888" font-size="12" text-anchor="middle">C-s T — burst-acme.tld (4 panes, tiled)</text>
+
+  <!-- pane borders: 2x2 grid -->
+  <g font-size="12" fill="#444444">
+    <text x="16" y="44">1 bash</text>
+    <text x="462" y="44">2 bash</text>
+    <text x="16" y="222">3 bash</text>
+    <text x="462" y="222">4 bash</text>
+  </g>
+  <line x1="450" y1="30" x2="450" y2="392" stroke="#333"/>
+  <line x1="0" y1="210" x2="900" y2="210" stroke="#333"/>
+
+  <text x="16" y="72" font-size="12.5">
+    <tspan fill="#8a8a8a">kali$ </tspan>
+    <tspan fill="#c8c8c8">nmap -sC -sV acme.tld</tspan>
+  </text>
+
+  <text x="462" y="72" font-size="12.5">
+    <tspan fill="#8a8a8a">kali$ </tspan>
+    <tspan fill="#c8c8c8">netexec smb acme.tld</tspan>
+  </text>
+
+  <text x="16" y="250" font-size="12.5">
+    <tspan fill="#8a8a8a">kali$ </tspan>
+    <tspan fill="#c8c8c8">enum4linux-ng -A acme.tld</tspan>
+  </text>
+
+  <text x="462" y="250" font-size="12.5">
+    <tspan fill="#8a8a8a">kali$ </tspan>
+    <tspan fill="#c8c8c8">ldapsearch -x -H acme.tld</tspan>
+  </text>
+
+  <rect x="10" y="360" width="880" height="30" rx="4" fill="#262626"/>
+  <text x="450" y="380" fill="#ffaf00" font-size="13" text-anchor="middle">staged 4 commands ('ad') for acme.tld — read them before you run them</text>
+</svg>
