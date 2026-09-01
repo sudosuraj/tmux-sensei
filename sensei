@@ -20,7 +20,11 @@ TM=(${SENSEI_TMUX:-tmux})          # socket-aware: SENSEI_TMUX="tmux -L lab" for
 LOOT="${SENSEI_LOOT:-$HOME/loot}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/sensei"
 BURST_CONF="${SENSEI_BURST_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/tmux/burst.conf}"
-mkdir -p "$LOOT" "$STATE"
+# no blanket `mkdir -p "$LOOT" "$STATE"` here on purpose — every function that
+# actually writes into one already ensures its own path (log_arm_pane, dump,
+# notes, case, save), and this script also runs as `sensei vpn`/`cmdtime` on
+# every status-bar/pane-border refresh; forcing two mkdir stats on every one
+# of those calls for directories they never touch is pure overhead.
 SENSEI_REPO="${SENSEI_REPO:-sudosuraj/tmux-sensei}"
 SENSEI_BRANCH="${SENSEI_BRANCH:-main}"
 
@@ -65,25 +69,31 @@ cmd_clip() {
 }
 
 cmd_vpn() {
+  # this runs on every status-bar redraw (status-interval, every 5s) — one `ip`
+  # call shared for both the tunnel and LAN lookups instead of two, since
+  # that's the whole cost of this function beyond bash's own startup.
+  local raw; raw=$(ip -4 -o addr show 2>/dev/null)
   local out="" iface addr lan up=0
   while read -r iface addr; do
     [ -n "$iface" ] && { out="$out#[fg=colour107,bold]$iface #[fg=colour223]$addr#[default]  "; up=1; }
-  done < <(_ip_tuns)
-  # this runs on every status-bar redraw (status-interval) already — piggyback
-  # on that cadence for an ACTIVE alert on the up->down transition, not just a
-  # red label that only helps if you're already looking at the bar. A dropped
-  # tunnel mid-scan is the "silent killer" the comment above already calls out;
-  # a passive color never actually pages you. Fires once per drop, not once
-  # per redraw — and never on the very first check (no VPN yet just means you
-  # haven't connected, not that it dropped).
+  done < <(printf '%s\n' "$raw" | awk '$2 ~ /^(tun|tap|wg|ppp)/ {split($4,a,"/"); print $2, a[1]}')
+  # ACTIVE alert on the up->down transition, not just a red label that only
+  # helps if you're already looking at the bar. A dropped tunnel mid-scan is
+  # the "silent killer" the comment above already calls out; a passive color
+  # never actually pages you. Fires once per drop, not once per redraw — and
+  # never on the very first check (no VPN yet just means you haven't
+  # connected, not that it dropped).
   local stf="$STATE/vpn_up" was=0
   [ -f "$stf" ] && was=$(cat "$stf" 2>/dev/null); [ -n "$was" ] || was=0
   if [ "$up" -eq 0 ] && [ "$was" = "1" ]; then
     "${TM[@]}" display-message -d 4000 "  ⚠ VPN TUNNEL DROPPED — you are off the attacker network" 2>/dev/null
   fi
+  [ -d "$STATE" ] || mkdir -p "$STATE"   # builtin stat first; only forks mkdir the one time it's missing
   printf '%s' "$up" > "$stf" 2>/dev/null
   [ -z "$out" ] && out="#[fg=colour203,bold]NO-VPN#[default]  "
-  lan=$(_ip_lan)
+  # matches _ip_lan's original `ip ... scope global` pre-filter, now done in
+  # awk instead since we're reusing the one shared, unfiltered `ip` snapshot
+  lan=$(printf '%s\n' "$raw" | awk '/scope global/ && $2 !~ /^(tun|tap|wg|ppp|lo|docker|br-|veth)/ {split($4,a,"/"); print $2, a[1]; exit}')
   [ -n "$lan" ] && out="$out#[fg=colour244]${lan% *} ${lan#* }#[default]"
   printf '%s' "$out"
 }
@@ -179,10 +189,15 @@ cmd_findall() {
 cmd_cmdtime() {
   local pane="${1:?pane_id}" cmd="${2:-}"
   local f="$STATE/cmdtime_${pane#%}" now started prevcmd
-  now=$(date +%s)
+  # $EPOCHSECONDS is a bash 4.2+ builtin — no fork, unlike `date +%s`. Falls
+  # back to date on macOS's stock /bin/bash (still 3.2, frozen pre-GPLv3),
+  # where the builtin is unset and would otherwise silently arithmetic-evaluate
+  # as 0, not fail loudly.
+  now=${EPOCHSECONDS:-$(date +%s)}
   if [ -f "$f" ]; then read -r started prevcmd < "$f"; fi
   if [ -z "${started:-}" ] || [ "${prevcmd:-}" != "$cmd" ]; then
     started="$now"
+    [ -d "$STATE" ] || mkdir -p "$STATE"   # builtin stat first; only forks mkdir the one time it's missing
     printf '%s %s\n' "$started" "$cmd" > "$f" 2>/dev/null
   fi
   local elapsed=$((now - started))
@@ -356,7 +371,7 @@ cmd_burst() {
 # dots are fine because we target by session:index, never by name.pane. Restores geometry + cwd only —
 # processes are deliberately NOT resurrected (I decide what re-runs on a target).
 cmd_save() {
-  local n="${1:-default}"; no_traversal "$n"; local f="$STATE/$n.layout"; : > "$f"
+  local n="${1:-default}"; no_traversal "$n"; mkdir -p "$STATE"; local f="$STATE/$n.layout"; : > "$f"
   "${TM[@]}" list-panes -a -F '#{session_name}::#{window_index}::#{window_name}::#{pane_index}::#{pane_current_path}::#{window_layout}' >> "$f"
   say "saved $(wc -l < "$f") panes -> $f"
 }
@@ -479,6 +494,57 @@ cmd_setup_shell() {
   fi
 }
 
+# ── curated cheat sheet ────────────────────────────────────────────────────────
+# tmux's own `list-keys` dumps every binding in every table, unfiltered — not
+# useful as "what did I actually customize here." This is the thing install.sh
+# promises ("C-s ?  (all keys)"); keep it in sync with tmux-sensei.conf's own
+# `bind` lines by hand, same as the README — there's no way to generate one
+# from the other without a lot more machinery than this project wants.
+cmd_help() {
+  cat <<'EOF'
+  tmux-sensei — key map (C-s = prefix unless noted)
+
+  PANES & WINDOWS (prefix-free, Alt)
+    M-h/j/k/l    move            M-H/J/K/L   resize
+    M-1..M-5     jump to window  M-o         last window
+    M-z          zoom pane       M-g         scratch popup (persistent)
+
+  PREFIX LAYER (C-s then...)
+    |  -         split vertical / horizontal     c    new window
+    Q            kill pane (no confirm)          C-q  kill session (confirm)
+    R            reload config                   s    session/window tree
+    Space        enter the sensei MODAL layer (stays until Esc — status bar
+                 shows a reverse-video MODAL tag the whole time it's active)
+
+  TARGET, EVIDENCE & STAGING
+    t            set @target                     T    STAGE a burst.conf chain for @target
+    C            new case skeleton                N    case-notes popup
+    C-l          toggle evidence logging (session) P   dump this pane -> case file
+    a  A         arm / disarm silence-watch
+
+  ATTACKER-IP & CLIPBOARD
+    i  I         copy tun IP / clickable IP menu   B   numbered paste-buffer picker
+    F            grep every pane's scrollback in this session
+
+  MODES & MISC
+    S            toggle synchronize-panes (loud when armed — see README)
+    E  g         edit-config popup / git popup     X  C-x   open / burn the lab socket
+    ?            this screen
+
+  SENSEI MODAL LAYER (C-s Space, then...)
+    h j k l      move            H J K L    resize
+    o  e         main-vertical / tiled layout      x   kill pane
+    m            swap pane                         Esc / q   leave
+
+  COPY-MODE (C-s [), then the grep-layer:
+    M-i IPs   M-u URLs   M-x hashes   M-t tokens/keys   M-s secrets   M-e errors
+    v select   C-v block-select   y copy (OSC 52, works over SSH)
+
+  Full detail: README.md. Every raw binding in every table: `tmux list-keys`
+  from a shell, not this popup.
+EOF
+}
+
 # ── self-update ───────────────────────────────────────────────────────────────
 # Pulls the latest installer from the repo and runs it. Law #1 is "nothing
 # curl|bash in the config itself" — so this downloads to a real file on disk
@@ -526,5 +592,6 @@ case "${1:-}" in
   restore) shift; cmd_restore "$@" ;;
   strip) shift; cmd_strip "$@" ;;
   setup-shell) cmd_setup_shell ;;
+  help) cmd_help ;;
   *) sed -n '2,20p' "$0" ;;
 esac
