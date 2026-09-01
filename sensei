@@ -23,8 +23,15 @@ SENSEI_BRANCH="${SENSEI_BRANCH:-main}"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 say() { "${TM[@]}" display-message "  $*" 2>/dev/null || printf '%s\n' "$*"; }
-# guard against a case/save/restore name walking us out of LOOT/STATE via ..
-no_traversal() { case "$1" in *..*) die "name may not contain '..': $1" ;; esac; }
+# guard against a case/save/restore name walking us out of LOOT/STATE via .. —
+# and against a literal ' breaking the shell command cmd_case embeds it in
+# (e.g. `vi '/loot/o'brien/notes.md'` — unbalanced the moment the name has one)
+no_traversal() {
+  case "$1" in
+    *..*) die "name may not contain '..': $1" ;;
+    *\'*) die "name may not contain a single quote: $1" ;;
+  esac
+}
 
 # ── vpn/iface indicator ───────────────────────────────────────────────────────
 # Shows the interface I'm actually attacking from. If this is blank and I'm
@@ -104,8 +111,18 @@ log_arm_pane() {   # $1 session  $2 pane_id
   d=$(sess_dir "$1"); mkdir -p "$d/panes"
   ts=$(date -u +%Y%m%dT%H%M%SZ)
   f="$d/panes/${ts}_${2#%}.log"
+  printf '# session=%s pane=%s started=%s host=%s\n' "$1" "$2" "$ts" "$(hostname)" > "$f"
+  # pipe-pane only captures output from this point forward. If logging gets
+  # armed late (the whole point of Law #4 is that this shouldn't cost you
+  # anything) whatever's already sitting in scrollback would otherwise just be
+  # lost the moment the pane closes — so backfill it before going live.
+  local backfill; backfill=$("${TM[@]}" capture-pane -t "$2" -p -S - -J 2>/dev/null)
+  if [ -n "$backfill" ]; then
+    printf '# --- backfilled scrollback (existed before logging was armed) ---\n' >> "$f"
+    printf '%s\n' "$backfill" >> "$f"
+    printf '# --- live capture begins here ---\n' >> "$f"
+  fi
   "${TM[@]}" pipe-pane -t "$2" -o "cat >> '$f'"
-  printf '# session=%s pane=%s started=%s host=%s\n' "$1" "$2" "$ts" "$(hostname)" >> "$f"
 }
 
 cmd_log() {
@@ -160,14 +177,21 @@ cmd_notes() {
 cmd_case() {
   local name="${1:?case name}" d; no_traversal "$name"; d=$(sess_dir "$name")
   mkdir -p "$d"/{panes,scrollback,evidence,tools-out}
-  if "${TM[@]}" has-session -t "=$name" 2>/dev/null; then "${TM[@]}" switch-client -t "=$name" 2>/dev/null; return; fi
-  "${TM[@]}" new-session  -d -s "$name" -n recon -c "$d"
-  "${TM[@]}" new-window   -t "=$name:" -n fuzz   -c "$d"
-  "${TM[@]}" new-window   -t "=$name:" -n shell  -c "$d"
-  "${TM[@]}" new-window   -t "=$name:" -n notes  -c "$d" "${EDITOR:-vi} '$d/notes.md'"
-  "${TM[@]}" set -t "=$name" @target "$name"
-  "${TM[@]}" select-window -t "=$name:recon"
-  "${TM[@]}" switch-client -t "=$name" 2>/dev/null || "${TM[@]}" attach -t "=$name"
+  # tmux silently replaces '.' and ':' in session names (they're target-string
+  # separators) — e.g. `sensei case acme.tld`, the exact example in the README
+  # and the installer's own onboarding text, actually creates a session named
+  # "acme_tld". Every "=$name" target below would then fail to find it, leaving
+  # a stub session with only the "recon" window and no @target set. Sanitize
+  # the SESSION name only; the loot dir and @target keep the real dotted name.
+  local sess; sess=$(printf '%s' "$name" | tr '.:' '__')
+  if "${TM[@]}" has-session -t "=$sess" 2>/dev/null; then "${TM[@]}" switch-client -t "=$sess" 2>/dev/null; return; fi
+  "${TM[@]}" new-session  -d -s "$sess" -n recon -c "$d"
+  "${TM[@]}" new-window   -t "=$sess:" -n fuzz   -c "$d"
+  "${TM[@]}" new-window   -t "=$sess:" -n shell  -c "$d"
+  "${TM[@]}" new-window   -t "=$sess:" -n notes  -c "$d" "${EDITOR:-vi} '$d/notes.md'"
+  "${TM[@]}" set -t "=$sess:" @target "$name"    # set-option needs the trailing ':' — a bare "=$sess" fails to resolve
+  "${TM[@]}" select-window -t "=$sess:recon"
+  "${TM[@]}" switch-client -t "=$sess" 2>/dev/null || "${TM[@]}" attach -t "=$sess"
 }
 
 # ── burst: STAGED recon, never executed ───────────────────────────────────────
