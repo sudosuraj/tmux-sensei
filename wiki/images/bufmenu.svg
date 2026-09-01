@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">
+  <rect width="640" height="300" fill="#1a1a1a"/>
+  <text x="20" y="30" fill="#8a8a8a" font-size="14">root@kali:~# </text>
+
+  <!-- tmux display-menu box -->
+  <rect x="140" y="60" width="360" height="180" rx="4" fill="#0f0f0f" stroke="#555"/>
+  <rect x="140" y="60" width="360" height="24" fill="#262626"/>
+  <text x="320" y="77" fill="#ccc" font-size="12" text-anchor="middle">paste buffer</text>
+
+  <g font-size="13" fill="#9a9a9a">
+    <text x="156" y="106"><tspan fill="#ffaf00">1:</tspan> flag{deadbeef1234}</text>
+    <text x="156" y="130"><tspan fill="#ffaf00">2:</tspan> admin:P@ssw0rd123</text>
+    <text x="156" y="154"><tspan fill="#ffaf00">3:</tspan> 10.10.14.7</text>
+    <text x="156" y="178"><tspan fill="#ffaf00">4:</tspan> eyJhbGciOiJIUzI1NiIs...</text>
+    <text x="156" y="202"><tspan fill="#ffaf00">5:</tspan> https://app.acme.tld/api</text>
+  </g>
+  <rect x="150" y="120" width="340" height="20" fill="#333" opacity="0.5"/>
+
+  <text x="320" y="270" fill="#808080" font-size="12" text-anchor="middle">B opens this — press a number or click to paste that copy back in</text>
+</svg>

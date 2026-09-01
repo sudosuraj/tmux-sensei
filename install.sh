@@ -113,6 +113,44 @@ done
   ok "created local.conf for your overrides"
 }
 
+# burst.conf: your own recon chains for `sensei burst` (prefix T). Created once,
+# never touched by updates, and ships with NO active profile — sensei has no
+# opinion about which tools you run. Uncomment the example or write your own.
+[ -f "$CFG_DIR/burst.conf" ] || {
+  cat > "$CFG_DIR/burst.conf" <<'BURSTEOF'
+# tmux-sensei burst profiles — created once, never touched by updates.
+#
+# `sensei burst` (prefix T) stages a chain of commands into tiled panes for
+# whatever @target you've set. Nothing here ever runs on its own — tmux only
+# *types* these commands (Law #3): you read them, fix the scope, and press
+# Enter yourself.
+#
+# Format:
+#   [profile-name]
+#   one command per line — {target} is replaced with your @target
+#   lines starting with # and blank lines are ignored
+#
+# One pane opens per command line — as many or as few as you write. Define as
+# many [profiles] as you want (web, ad, internal, whatever fits the engagement)
+# and burst will offer a pick-list whenever more than one exists.
+#
+# Nothing is active by default. Uncomment to try the example, or replace it
+# with your own from scratch.
+#
+# [web]
+# subfinder -silent -d {target} | anew subs.txt
+# httpx -l subs.txt -sc -title -tech-detect -o http.txt
+# nuclei -l http.txt -severity medium,high,critical -o nuclei.txt
+# ffuf -u https://{target}/FUZZ -w ~/wl/raft-small.txt -mc all -fc 404 -o ffuf.json
+#
+# [ad]
+# nmap -sC -sV -oA nmap-{target} {target}
+# netexec smb {target} -u '' -p '' --shares
+# enum4linux-ng -A {target}
+BURSTEOF
+  ok "created burst.conf (no active profile — see the file for the format)"
+}
+
 # ── 5. shell wiring (idempotent — added once, ever) ───────────────────────────
 detect_rc() {
   case "${SHELL##*/}" in
