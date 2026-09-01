@@ -123,7 +123,15 @@ cmd_log() {
         while read -r p; do log_arm_pane "$sess" "$p"; done < <("${TM[@]}" list-panes -s -t "$sess" -F '#{pane_id}')
         say "logging ON  · $(sess_dir "$sess")/panes"
       fi ;;
-    inherit) [ -n "$cur" ] && [ -n "$pane" ] && log_arm_pane "$sess" "$pane" ;;
+    inherit)
+      # runs on EVERY new pane (after-split-window / after-new-window), logging
+      # armed or not. The nested tmux call just above (show -t ... -v @log) can
+      # race a just-created pane into copy-mode before its shell ever starts —
+      # so the very next keys typed into it (by a human, or by `sensei burst`)
+      # get read as copy-mode navigation and silently vanish instead of being
+      # typed. Cancel unconditionally; it's a no-op on a pane not in a mode.
+      [ -n "$pane" ] && "${TM[@]}" send-keys -t "$pane" -X cancel 2>/dev/null
+      [ -n "$cur" ] && [ -n "$pane" ] && log_arm_pane "$sess" "$pane" ;;
     status)  [ -n "$cur" ] && echo on || echo off ;;
     *) die "log: toggle|inherit|status" ;;
   esac
