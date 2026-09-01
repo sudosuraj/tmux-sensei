@@ -130,6 +130,13 @@ cmd_bufmenu() {
   while read -r name; do
     [ -n "$name" ] || continue
     preview=$("${TM[@]}" show-buffer -b "$name" 2>/dev/null | head -c 50 | tr '\n' ' ')
+    # display-menu item names are tmux FORMAT strings — tmux runs #(shell-command)
+    # in them at render time, with no interaction needed. Buffer content is
+    # whatever you copied with `y` in copy-mode, which can be scrollback from a
+    # target/remote host: a hostname or filename containing "#(...)" would
+    # execute on YOUR machine the instant this menu is drawn. Escape every '#'
+    # to tmux's own literal-# form ('##') before it ever reaches display-menu.
+    preview=${preview//#/##}
     menu+=( "$i: $preview" "$i" "paste-buffer -b $name" )
     i=$((i+1))
     [ "$i" -gt 9 ] && break   # only the 9 most recent — beyond that, choose-buffer
