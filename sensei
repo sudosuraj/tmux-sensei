@@ -22,6 +22,8 @@ SENSEI_BRANCH="${SENSEI_BRANCH:-main}"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 say() { "${TM[@]}" display-message "  $*" 2>/dev/null || printf '%s\n' "$*"; }
+# guard against a case/save/restore name walking us out of LOOT/STATE via ..
+no_traversal() { case "$1" in *..*) die "name may not contain '..': $1" ;; esac; }
 
 # ── vpn/iface indicator ───────────────────────────────────────────────────────
 # Shows the interface I'm actually attacking from. If this is blank and I'm
@@ -147,7 +149,7 @@ cmd_notes() {
 # ── case skeleton ─────────────────────────────────────────────────────────────
 # One session per target. Windows are named by phase, never auto-renamed.
 cmd_case() {
-  local name="${1:?case name}" d; d=$(sess_dir "$name")
+  local name="${1:?case name}" d; no_traversal "$name"; d=$(sess_dir "$name")
   mkdir -p "$d"/{panes,scrollback,evidence,tools-out}
   if "${TM[@]}" has-session -t "=$name" 2>/dev/null; then "${TM[@]}" switch-client -t "=$name" 2>/dev/null; return; fi
   "${TM[@]}" new-session  -d -s "$name" -n recon -c "$d"
@@ -191,12 +193,12 @@ cmd_burst() {
 # dots are fine because we target by session:index, never by name.pane. Restores geometry + cwd only —
 # processes are deliberately NOT resurrected (I decide what re-runs on a target).
 cmd_save() {
-  local n="${1:-default}"; local f="$STATE/$n.layout"; : > "$f"
+  local n="${1:-default}"; no_traversal "$n"; local f="$STATE/$n.layout"; : > "$f"
   "${TM[@]}" list-panes -a -F '#{session_name}::#{window_index}::#{window_name}::#{pane_index}::#{pane_current_path}::#{window_layout}' >> "$f"
   say "saved $(wc -l < "$f") panes -> $f"
 }
 cmd_restore() {
-  local n="${1:-default}"; local f="$STATE/$n.layout"; [ -f "$f" ] || die "no snapshot: $f"
+  local n="${1:-default}"; no_traversal "$n"; local f="$STATE/$n.layout"; [ -f "$f" ] || die "no snapshot: $f"
   local s w wn p path lay
   local line
   while IFS= read -r line; do
@@ -288,18 +290,31 @@ cmd_setup_shell() {
 }
 
 # ── self-update ───────────────────────────────────────────────────────────────
-# Pulls the latest installer from the repo and runs it. The installer stages to
-# temp, swaps only what changed, and reloads a running tmux — so this is safe to
-# run mid-session. Honors SENSEI_REPO / SENSEI_BRANCH.
+# Pulls the latest installer from the repo and runs it. Law #1 is "nothing
+# curl|bash in the config itself" — so this downloads to a real file on disk
+# FIRST (same staging discipline install.sh itself uses) instead of piping
+# straight into bash, and asks before executing it. The installer then stages
+# its own fetches to temp, swaps only what changed, and reloads a running
+# tmux. Honors SENSEI_REPO / SENSEI_BRANCH.
 cmd_update() {
   local url="https://raw.githubusercontent.com/${SENSEI_REPO}/${SENSEI_BRANCH}/install.sh"
   local dl
   if command -v curl >/dev/null 2>&1; then dl="curl -fsSL";
   elif command -v wget >/dev/null 2>&1; then dl="wget -qO-";
   else die "need curl or wget to update"; fi
-  printf 'updating tmux-sensei from %s (%s)...\n' "$SENSEI_REPO" "$SENSEI_BRANCH"
-  $dl "$url" | SENSEI_REPO="$SENSEI_REPO" SENSEI_BRANCH="$SENSEI_BRANCH" bash \
-    || die "update failed — check network and that $SENSEI_REPO is reachable"
+  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/sensei-update.XXXXXX")"
+  trap 'rm -f "$tmp"' RETURN
+  printf 'fetching install.sh from %s (%s)...\n' "$SENSEI_REPO" "$SENSEI_BRANCH"
+  $dl "$url" > "$tmp" || die "fetch failed — check network and that $SENSEI_REPO is reachable"
+  [ -s "$tmp" ] || die "downloaded empty install.sh — does $SENSEI_BRANCH exist?"
+  printf 'staged to %s — review it before running (Law #1).\n' "$tmp"
+  printf 'run it now? [y/N] '
+  read -r ans
+  case "$ans" in
+    y|Y) SENSEI_REPO="$SENSEI_REPO" SENSEI_BRANCH="$SENSEI_BRANCH" bash "$tmp" ;;
+    *)   printf 'not run. inspect it yourself: less %s && bash %s\n' "$tmp" "$tmp"
+         trap - RETURN ;;
+  esac
 }
 
 case "${1:-}" in
