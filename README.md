@@ -94,7 +94,13 @@ C-l          toggle evidence logging (whole session)       P    dump this pane's
 N            case-notes popup                              C    new case skeleton
 a   A        arm / disarm silence-watch (scan-done alert)
 E   g        edit-config popup / git popup                 X    open lab socket   C-x  burn the lab
+B            numbered paste-buffer picker (last 9 copies)  F    search every pane's scrollback
+S            toggle synchronize-panes (loud when armed — see below)
 ```
+
+### `S` — synchronize-panes, on purpose
+
+Broadcasts every keystroke to every pane in the window — genuinely useful for re-running one command across parallel hosts or restarting several listeners at once. It's also the one binding here that can do real damage if you forget it's on: type into a pane you thought was just yours and it goes everywhere, including an `ssh` session to a client host. So it's loud on purpose — pane borders and the status bar both show **`[SYNC]`**/**`SYNC`** as text (not just a color, so it still shows on a serial console) the instant it's armed, and it's a deliberate two-key toggle, never something bound without a prefix.
 
 ### The sensei modal layer (`C-s Space`)
 
@@ -133,7 +139,9 @@ sensei notes <sess>           open the case notebook (notes.md)
 sensei save   [name]          snapshot layout + cwd of every session
 sensei restore [name]         rebuild that layout (geometry + cwd only — processes are NOT re-run)
 sensei strip <logfile>        ANSI-strip a log for a report
-sensei vpn                    the tun/wg indicator shown in the status bar
+sensei vpn                    the tun/wg indicator shown in the status bar (also fires an alert on drop)
+sensei bufmenu                numbered pick-list of the last 9 copied buffers, with a preview
+sensei findall <sess> <pat>   grep every pane's scrollback in a session, pick-list of the hits
 ```
 
 ### `sensei burst` — the whole safety philosophy in one command
@@ -155,14 +163,24 @@ enum4linux-ng -A {target}
 
 `{target}` is substituted with your `@target`; one pane opens per line, so an internal-AD chain and a five-tool web chain each get exactly the number of panes they need. Define one profile and `T` runs it directly; define several and `T` pops a pick-list so you choose per engagement instead of the tool guessing. And it **stops**. Nothing runs. You read each command, fix the scope, and press Enter yourself — the tool lays the work out for you but will never fire a scan at a target because you fat-fingered a keybind, or because it assumed you're doing a bug bounty when you're actually on an internal AD box.
 
+### `sensei setup-shell` — live ghost-text, opt-in only
+
+tmux can't give you Fish-style history autosuggestions — that's a shell feature, not a multiplexer one — so this configures your **shell**, not tmux, and never touches your login shell without asking first.
+
+- **bash:** if [`ble.sh`](https://github.com/akinomyoga/ble.sh) is installed, wires it in for real per-keystroke ghost text (updates as you type, right-arrow/End to accept). If it isn't, falls back to prefix history-search on up/down (works immediately, no packages) and prints the (non-`curl|bash`) install command for ble.sh.
+- **zsh:** wires in `zsh-autosuggestions` the same way if it's installed, or tells you how to get it.
+
+Run it again any time you install one of these later — it's idempotent and only ever appends once.
+
 ---
 
 ## The status bar
 
 Two lines, and the only things that get colour are the ones that can hurt you:
 
-- **top:** a `^` when the prefix is armed · `sensei` + session name · short hostname · **`tgt:<target>`** (peach) when a target is set · **`REC`** (green) when logging is on · the VPN/interface indicator · clock.
+- **top:** a `^` when the prefix is armed · `sensei` + session name · short hostname · **`tgt:<target>`** (peach) when a target is set · **`REC`** (green) when logging is on · **`SYNC`** (red) when synchronize-panes is armed · the VPN/interface indicator, which also fires an active alert (not just a color change) the instant the tunnel drops · clock.
 - **bottom:** your windows, named by phase. A window that's gone quiet shows `(quiet)` if silence-watch is armed.
+- **pane borders:** now also show how long the current foreground command has been running, e.g. `nmap (12m)` — paired with silence-watch, that's "still working" vs. "probably hung" at a glance across a dozen panes.
 
 Pane borders carry state too: the border and title show what's running, tag `[remote]` on an `ssh` pane, and turn **red** the moment a pane is running `ssh` or `sudo`.
 
