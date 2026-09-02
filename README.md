@@ -69,7 +69,7 @@ Uninstall anytime: `./uninstall.sh` (restores your previous config from the back
 |---|---|
 | C-s \| | Split vertically (new pane inherits the current working directory) |
 | `C-s -` | Split horizontally (inherits cwd) |
-| `C-s c` | New window (inherits cwd) |
+| `C-s c` | New window (inherits cwd) — names itself after whatever's running, falling back to the shell name when idle. `sensei case`/`burst` windows don't do this; their phase names (`recon`, `fuzz`…) stay fixed on purpose |
 | `C-s Q` | Kill the current pane — **no confirmation** |
 | `C-s C-q` | Kill the whole session — asks `y/n` first |
 | `C-s r` | Respawn the current pane (kill + restart the same command) |
