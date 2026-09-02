@@ -146,6 +146,20 @@ One key each, instead of piping a pane through `grep`:
 | `C-s a` | Arm silence-watch on this window (flags it `(quiet)` after 45s of no output) |
 | `C-s A` | Disarm silence-watch |
 
+### Click instead of prefix+key
+
+`mouse on` is set, so a lot of this needs no keybind at all:
+
+| Click | What it does |
+|---|---|
+| A window's name in the bottom status line | Switch straight to it — no `C-s`, no number (this is a stock tmux behavior tmux-sensei never disabled) |
+| A pane's border (the strip showing `1 bash (12m)` above every pane) | Jump focus to that pane |
+| Anywhere in a pane | Focus it (stock tmux behavior) |
+| The right side of the **top** status line, where the VPN readout lives | Copy the tunnel IP — same as `C-s i` |
+| Right-click a window name | Context menu (rename, kill, swap, new window…) |
+| Drag inside a pane, release | Select text and copy it (OSC 52) without disturbing the scroll position |
+| Shift+drag | Bypass tmux and select with your *local* terminal instead (works over SSH) |
+
 ### Popups
 
 | Key | How to use it |

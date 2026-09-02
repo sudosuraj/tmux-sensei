@@ -146,6 +146,10 @@ cmd_bufmenu() {
   while read -r name; do
     [ -n "$name" ] || continue
     preview=$("${TM[@]}" show-buffer -b "$name" 2>/dev/null | head -c 50 | tr '\n' ' ')
+    # skip buffers with nothing to show (an empty selection copied by accident,
+    # or all-whitespace content) — an empty numbered slot is just clutter, and
+    # skipping it here (before $i advances) keeps the visible list gap-free
+    case "$preview" in *[![:space:]]*) ;; *) continue ;; esac
     # display-menu item names are tmux FORMAT strings — tmux runs #(shell-command)
     # in them at render time, with no interaction needed. Buffer content is
     # whatever you copied with `y` in copy-mode, which can be scrollback from a
