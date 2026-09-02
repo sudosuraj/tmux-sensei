@@ -101,6 +101,7 @@ a   A        arm / disarm silence-watch (scan-done alert)
 E   g        edit-config popup / git popup                 X    open lab socket   C-x  burn the lab
 B            numbered paste-buffer picker (last 9 copies)  F    search every pane's scrollback
 S            toggle synchronize-panes (loud when armed — see below)
+M            resync mouse tracking — scroll/click typing gibberish? press this
 ```
 
 ### `S` — synchronize-panes, on purpose
