@@ -162,7 +162,7 @@ Copy-mode's grep-layer only searches the pane you're already looking at. Once yo
 
 <img src="images/bufmenu.svg" alt="A numbered menu listing recent clipboard copies with previews">
 
-Every copy you make with `y` (or a mouse drag) lands in a numbered tmux buffer. `C-s B` opens a picker showing the last nine, each with a preview of its actual content, so getting back the IP you copied three actions ago is one keypress instead of digging through `tmux choose-buffer`'s bare list.
+Every copy you make with `y` (or a mouse drag) lands in a numbered tmux buffer. `C-s B` opens a picker showing the last twenty, each with a preview of its actual content, so getting back the IP you copied a dozen actions ago is one keypress instead of digging through `tmux choose-buffer`'s bare list.
 
 ---
 

@@ -134,7 +134,7 @@ One key each, instead of piping a pane through `grep`:
 |---|---|
 | `C-s i` | Copy the tunnel (VPN) IP straight to your clipboard |
 | `C-s I` | Open a clickable menu of every IP — click one to copy it |
-| `C-s B` | Numbered picker of your last 9 copies, with a preview of each |
+| `C-s B` | Numbered picker of your last 20 copies, with a preview of each |
 | `C-s F` | Type a pattern; greps every pane's scrollback in the session and lists which panes matched |
 
 ### Modes & recovery
@@ -238,7 +238,7 @@ C-l          toggle evidence logging (whole session)       P    dump this pane's
 N            case-notes popup                              C    new case skeleton
 a   A        arm / disarm silence-watch (scan-done alert)
 E   g        edit-config popup / git popup                 X    open lab socket   C-x  burn the lab
-B            numbered paste-buffer picker (last 9 copies)  F    search every pane's scrollback
+B            numbered paste-buffer picker (last 20 copies)  F    search every pane's scrollback
 S            toggle synchronize-panes (loud when armed — see below)
 M            resync mouse tracking — scroll/click typing gibberish? press this
 ```
@@ -285,7 +285,7 @@ sensei save   [name]          snapshot layout + cwd of every session
 sensei restore [name]         rebuild that layout (geometry + cwd only — processes are NOT re-run)
 sensei strip <logfile>        ANSI-strip a log for a report
 sensei vpn                    the tun/wg indicator shown in the status bar (also fires an alert on drop)
-sensei bufmenu                numbered pick-list of the last 9 copied buffers, with a preview
+sensei bufmenu                numbered pick-list of the last 20 copied buffers, with a preview
 sensei findall <sess> <pat>   grep the last 5000 lines/pane (SENSEI_FINDALL_LINES=0 for everything)
 ```
 
