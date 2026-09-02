@@ -41,6 +41,145 @@ Uninstall anytime: `./uninstall.sh` (restores your previous config from the back
 
 ---
 
+## Quick reference — every shortcut and command
+
+`C-s` is the prefix. A key marked **no prefix** works on its own (usually `Alt`). Pulled straight from `tmux-sensei.conf` and `sensei`, so this stays accurate as either changes — if you rebind something, update it here too.
+
+### Nested tmux & the prefix
+
+| Key | How to use it |
+|---|---|
+| `C-s C-s` | Send a literal prefix keystroke through to a tmux running inside this one (SSH'd into a box that's also on tmux) |
+| `F12` (no prefix) | Hand the keyboard entirely to whatever's in the current pane — local tmux visibly goes deaf. `F12` again to take it back |
+
+### Moving around (no prefix — Alt)
+
+| Key | How to use it |
+|---|---|
+| `Alt-h` / `j` / `k` / `l` | Move to the pane left / down / up / right |
+| `Alt-H` / `J` / `K` / `L` | Resize the current pane in that direction |
+| `Alt-1` … `Alt-5` | Jump straight to window 1–5 |
+| `Alt-o` | Jump to the last window you were on |
+| `Alt-z` | Zoom the current pane full-screen (press again to unzoom) |
+| `Alt-g` | Open the persistent scratch popup (see [Popups](#popups)) |
+
+### Windows & panes (prefix)
+
+| Key | How to use it |
+|---|---|
+| C-s \| | Split vertically (new pane inherits the current working directory) |
+| `C-s -` | Split horizontally (inherits cwd) |
+| `C-s c` | New window (inherits cwd) |
+| `C-s Q` | Kill the current pane — **no confirmation** |
+| `C-s C-q` | Kill the whole session — asks `y/n` first |
+| `C-s r` | Respawn the current pane (kill + restart the same command) |
+| `C-s s` | Session/window picker (`choose-tree`) |
+| `C-s R` | Reload the config |
+
+### The sensei modal layer
+
+| Key | How to use it |
+|---|---|
+| `C-s Space` | Enter the modal layer — **stays active until `Esc`** (status bar shows a reverse-video `MODAL` tag the whole time) |
+| `h j k l` | (inside the layer) move between panes |
+| `H J K L` | (inside the layer) resize |
+| `o` | (inside the layer) main-vertical layout |
+| `e` | (inside the layer) tiled layout |
+| `m` | (inside the layer) swap this pane with the next |
+| `x` | (inside the layer) kill this pane — **no confirmation** |
+| `Esc` or `q` | Leave the layer |
+
+### Copy-mode & the clipboard
+
+| Key | How to use it |
+|---|---|
+| `C-s [` | Enter copy-mode |
+| `C-s /` | Enter copy-mode and start an incremental search |
+| `C-s ]` | Paste the most recent buffer |
+| `C-s b` | List every tmux buffer (raw tmux picker) |
+| `v` | (in copy-mode) start a selection |
+| `C-v` | (in copy-mode) toggle rectangle/block selection |
+| `y` | (in copy-mode) copy the selection — over OSC 52, so it reaches your real clipboard even through SSH |
+| `Esc` | (in copy-mode) cancel out |
+| Mouse drag, release | Select with the mouse; releasing copies it (doesn't jump the view) |
+| Scroll wheel up | First scroll enters copy-mode and scrolls; further scrolling just scrolls |
+
+### The grep-layer (inside copy-mode)
+
+One key each, instead of piping a pane through `grep`:
+
+| Key | Finds |
+|---|---|
+| `Alt-i` | IPs (with an optional `:port`) |
+| `Alt-u` | URLs |
+| `Alt-x` | Hashes (md5/sha) |
+| `Alt-t` | Tokens & keys (JWT, AWS keys, GitHub tokens, PEM blocks) |
+| `Alt-s` | Secret-looking words (`token`, `api_key`, `password`, `authorization`…) |
+| `Alt-e` | Errors (`ERROR`, `Traceback`, `denied`, `refused`, `403`, `500`…) |
+
+### Target, evidence & staging
+
+| Key | How to use it |
+|---|---|
+| `C-s t` | Set `@target` (typed into a prompt; shown in the status bar) |
+| `C-s T` | Stage a `burst.conf` chain for the current target — types commands, never runs them |
+| `C-s C` | Build a new case: a session with `recon`/`fuzz`/`shell`/`notes` windows and a loot dir |
+| `C-s N` | Open the case-notes popup |
+| `C-s C-l` | Toggle evidence logging for the whole session (backfills existing scrollback) |
+| `C-s P` | Dump the current pane's scrollback into the case folder |
+
+### Attacker IP, search & clipboard picker
+
+| Key | How to use it |
+|---|---|
+| `C-s i` | Copy the tunnel (VPN) IP straight to your clipboard |
+| `C-s I` | Open a clickable menu of every IP — click one to copy it |
+| `C-s B` | Numbered picker of your last 9 copies, with a preview of each |
+| `C-s F` | Type a pattern; greps every pane's scrollback in the session and lists which panes matched |
+
+### Modes & recovery
+
+| Key | How to use it |
+|---|---|
+| `C-s S` | Toggle `synchronize-panes` — broadcasts keystrokes to every pane in the window. **Loud on purpose**: borders and status bar both show `[SYNC]` |
+| `C-s M` | Resync mouse tracking — press this if scrolling/clicking starts typing gibberish into the shell |
+| `C-s a` | Arm silence-watch on this window (flags it `(quiet)` after 45s of no output) |
+| `C-s A` | Disarm silence-watch |
+
+### Popups
+
+| Key | How to use it |
+|---|---|
+| `Alt-g` (no prefix) | Persistent scratch popup — same shell every time, survives detach (`C-s d` to leave it running) |
+| `C-s E` | Edit the config in `$EDITOR` and reload automatically on save |
+| `C-s g` | Git popup (`lazygit` if installed, else `git status`) |
+| `C-s ?` | Curated cheat sheet of everything on this page — not tmux's raw, unfiltered `list-keys` dump |
+| `C-s X` | Open the lab — a fully separate tmux socket + config for breaking things on purpose |
+| `C-s C-x` | Burn the lab (kill it instantly, from your real session) |
+
+### `sensei` — the command-line side
+
+Every one of these is also safe to type by hand outside of a keybinding:
+
+| Command | How to use it |
+|---|---|
+| `sensei case <name>` | Build the session skeleton described above (same as `C-s C`) |
+| `sensei burst <sess> <target> [profile]` | Stage a `burst.conf` chain — pick a profile explicitly, or let it prompt when there's more than one |
+| `sensei log toggle <sess>` | Arm/disarm evidence logging by hand |
+| `sensei dump <pane> <sess>` | Flush one pane's scrollback to the case folder |
+| `sensei notes <sess>` | Open the case notebook |
+| `sensei save [name]` / `sensei restore [name]` | Snapshot every session's layout + cwd, or rebuild it later (processes are never re-run) |
+| `sensei findall <sess> <pattern>` | Same as `C-s F`, callable directly; `SENSEI_FINDALL_LINES=0` searches full scrollback instead of the last 5000 lines |
+| `sensei bufmenu` | Same as `C-s B`, callable directly |
+| `sensei strip <logfile>` | Strip ANSI codes from a log so it's clean for a report |
+| `sensei vpn` | Print the tun/wg status-bar readout by hand |
+| `sensei setup-shell` | Opt-in: wire up live ghost-text autosuggestions for bash (`ble.sh`) or zsh (`zsh-autosuggestions`) |
+| `sensei experiment <name>` | Scaffold a new drop-in idea in `~/.config/tmux/local.d/` and open it |
+| `sensei update` | Check for and install updates — stages to a temp file and asks before running, never a blind `curl` piped into `bash` |
+| `sensei help` | Print the same cheat sheet `C-s ?` shows |
+
+---
+
 ## Why another tmux config
 
 I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and every default follows from them:
