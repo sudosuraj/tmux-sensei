@@ -136,11 +136,20 @@ cmd_ipmenu() {
 # `choose-buffer`'s full-screen picker. Shows a preview so you're not guessing
 # which slot has what.
 cmd_bufmenu() {
-  local i=1 name preview
+  local i=1 name preview key
+  # quick single-key select for all 20 slots — tmux menu keys must be a single
+  # keystroke, so past 9 this can't just be "10", "11"... : digits 1-9, then 0
+  # for the 10th, then a-j for the 11th through 20th. Arrow keys + Enter (or a
+  # click) still work on every slot regardless.
+  local letters="abcdefghij"
   local -a menu=()
   while read -r name; do
     [ -n "$name" ] || continue
     preview=$("${TM[@]}" show-buffer -b "$name" 2>/dev/null | head -c 50 | tr '\n' ' ')
+    # skip buffers with nothing to show (an empty selection copied by accident,
+    # or all-whitespace content) — an empty numbered slot is just clutter, and
+    # skipping it here (before $i advances) keeps the visible list gap-free
+    case "$preview" in *[![:space:]]*) ;; *) continue ;; esac
     # display-menu item names are tmux FORMAT strings — tmux runs #(shell-command)
     # in them at render time, with no interaction needed. Buffer content is
     # whatever you copied with `y` in copy-mode, which can be scrollback from a
@@ -148,9 +157,14 @@ cmd_bufmenu() {
     # execute on YOUR machine the instant this menu is drawn. Escape every '#'
     # to tmux's own literal-# form ('##') before it ever reaches display-menu.
     preview=${preview//#/##}
-    menu+=( "$i: $preview" "$i" "paste-buffer -b $name" )
+    case "$i" in
+      [1-9]) key="$i" ;;
+      10)    key=0 ;;
+      *)     key="${letters:$((i-11)):1}" ;;
+    esac
+    menu+=( "$i: $preview" "$key" "paste-buffer -b $name" )
     i=$((i+1))
-    [ "$i" -gt 9 ] && break   # only the 9 most recent — beyond that, choose-buffer
+    [ "$i" -gt 20 ] && break   # only the 20 most recent — beyond that, choose-buffer
   done < <("${TM[@]}" list-buffers -F '#{buffer_name}' 2>/dev/null)
   [ "${#menu[@]}" -gt 0 ] || { say "no buffers yet — copy something first"; return 1; }
   "${TM[@]}" display-menu -T "#[align=centre]paste buffer" -x C -y C "${menu[@]}"
@@ -540,10 +554,16 @@ cmd_help() {
     M-1..M-5     jump to window  M-o         last window
     M-z          zoom pane       M-g         scratch popup (persistent)
 
+  NESTED / REMOTE TMUX
+    C-s C-s      send a literal prefix keystroke through to it
+    F12          hand the keyboard entirely to it (local tmux visibly
+                 goes deaf); F12 again to take control back
+
   PREFIX LAYER (C-s then...)
     |  -         split vertical / horizontal     c    new window
     Q            kill pane (no confirm)          C-q  kill session (confirm)
-    R            reload config                   s    session/window tree
+    r            respawn pane (kill + restart)    R    reload config
+    s            session/window tree
     Space        enter the sensei MODAL layer (stays until Esc — status bar
                  shows a reverse-video MODAL tag the whole time it's active)
 
@@ -553,8 +573,8 @@ cmd_help() {
     C-l          toggle evidence logging (session) P   dump this pane -> case file
     a  A         arm / disarm silence-watch
 
-  ATTACKER-IP & CLIPBOARD
-    i  I         copy tun IP / clickable IP menu   B   numbered paste-buffer picker
+  ATTACKER-IP, CLIPBOARD & SEARCH
+    i  I         copy tun IP / clickable IP menu   B   numbered paste-buffer picker (last 20)
     F            grep every pane's scrollback in this session
 
   MODES & MISC
@@ -568,9 +588,19 @@ cmd_help() {
     o  e         main-vertical / tiled layout      x   kill pane
     m            swap pane                         Esc / q   leave
 
-  COPY-MODE (C-s [), then the grep-layer:
+  COPY-MODE (C-s [), and its utility keys:
+    /            enter copy-mode + incremental search
+    ]            paste the most recent buffer       b   list every buffer (raw)
+    v            select      C-v  block-select      y   copy (OSC 52, works over SSH)
+
+  COPY-MODE grep-layer — one key each, instead of piping through grep:
     M-i IPs   M-u URLs   M-x hashes   M-t tokens/keys   M-s secrets   M-e errors
-    v select   C-v block-select   y copy (OSC 52, works over SSH)
+
+  ENV OVERRIDES (export in your shell rc, not tmux options)
+    SENSEI_LOOT=<dir>          where case/evidence files land (default ~/loot)
+    SENSEI_BURST_CONF=<file>   burst.conf location (default ~/.config/tmux/burst.conf)
+    SENSEI_FINDALL_LINES=<n>   scrollback depth for F/findall (default 5000, 0 = unbounded)
+    SENSEI_TMUX="tmux -L ..."  point the sensei script at a different socket
 
   Full detail: README.md. Every raw binding in every table: `tmux list-keys`
   from a shell, not this popup.
