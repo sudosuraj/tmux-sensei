@@ -620,8 +620,9 @@ cmd_update() {
   if command -v curl >/dev/null 2>&1; then dl="curl -fsSL";
   elif command -v wget >/dev/null 2>&1; then dl="wget -qO-";
   else die "need curl or wget to update"; fi
-  local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/sensei-update.XXXXXX")"
-  trap 'rm -f "$tmp"' RETURN
+  local tmpdir; tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/sensei-update.XXXXXX")"
+  local tmp="$tmpdir/install.sh"
+  trap 'rm -rf "$tmpdir"' RETURN
   printf 'fetching install.sh from %s (%s)...\n' "$SENSEI_REPO" "$SENSEI_BRANCH"
   $dl "$url" > "$tmp" || die "fetch failed — check network and that $SENSEI_REPO is reachable"
   [ -s "$tmp" ] || die "downloaded empty install.sh — does $SENSEI_BRANCH exist?"
@@ -629,9 +630,20 @@ cmd_update() {
   printf 'run it now? [y/N] '
   read -r ans
   case "$ans" in
-    y|Y) SENSEI_REPO="$SENSEI_REPO" SENSEI_BRANCH="$SENSEI_BRANCH" bash "$tmp" ;;
-    *)   printf 'not run. inspect it yourself: less %s && bash %s\n' "$tmp" "$tmp"
-         trap - RETURN ;;
+    y|Y)
+      # install.sh prefers a local clone (tmux-sensei.conf + sensei sitting in
+      # the current directory) over downloading — exactly right for
+      # ./install.sh run from a fresh `git clone`, but wrong here: if your
+      # shell happened to be sitting inside an old clone of this repo when
+      # you typed `sensei update`, it would silently reuse those stale local
+      # files instead of fetching fresh ones from GitHub, then correctly (but
+      # uselessly) report "already up to date" against your own outdated
+      # copy. Run it from a directory that's guaranteed not to have those
+      # files, so it always actually hits the network.
+      ( cd "$tmpdir" && SENSEI_REPO="$SENSEI_REPO" SENSEI_BRANCH="$SENSEI_BRANCH" bash "$tmp" )
+      ;;
+    *) printf 'not run. inspect it yourself: less %s && bash %s\n' "$tmp" "$tmp"
+       trap - RETURN ;;
   esac
 }
 
