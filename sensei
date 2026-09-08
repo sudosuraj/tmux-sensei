@@ -1352,14 +1352,59 @@ EOF
   say "Tab-completion wired into ~/.zshrc — works for anything on PATH, not a fixed list"
 }
 
+# ── Tab candidates as a TEMPORARY menu, not a permanent scrollback dump ────────
+# Stock bash/zsh both do the same thing when a completion has many matches:
+# print every one of them straight into your terminal, which then sits there
+# in scrollback forever. Harmless for a handful of filenames; genuinely bad
+# for a tool like curl with 300+ flags. Both shells have a real fix, but it's
+# a different mechanism per shell, and it's a global readline/zle behavior
+# change (every completion, not just sensei's) -- opt-in, part of
+# `sensei setup-shell`, not forced on silently.
+_setup_shell_menu_bash() {
+  local br="$HOME/.bashrc"; touch "$br"
+  local body
+  body=$(cat <<'EOF'
+# rebinds Tab to CYCLE candidates in place -- each press substitutes the
+# next match directly into the command line -- instead of listing them, so
+# a tool with hundreds of flags never dumps hundreds of lines into
+# scrollback. Shift-Tab cycles backward. Applies to every completion, not
+# just sensei's.
+bind 'TAB:menu-complete' 2>/dev/null
+bind '"\e[Z":menu-complete-backward' 2>/dev/null
+EOF
+)
+  _write_block "$br" "menu" "$body"
+  say "Tab now cycles candidates in place in ~/.bashrc (Shift-Tab to go back) instead of listing them"
+}
+
+_setup_shell_menu_zsh() {
+  command -v zsh >/dev/null 2>&1 || return 0
+  local zr="$HOME/.zshrc"; touch "$zr"
+  local body
+  body=$(cat <<'EOF'
+# turns a completion list into zsh's own interactive menu -- arrow keys to
+# move, Enter to pick -- which redraws/clears instead of getting printed
+# into scrollback permanently. Applies to every completion, not just
+# sensei's.
+zstyle ':completion:*' menu select
+EOF
+)
+  _write_block "$zr" "menu" "$body"
+  say "Tab-completion now shows a temporary interactive menu in ~/.zshrc instead of a permanent list"
+}
+
 cmd_setup_shell() {
   printf '\n  This configures your SHELL (not tmux): live history autosuggestions,\n'
-  printf '  and Tab-completion that asks each tool about itself — dynamically,\n'
-  printf '  for anything on PATH, not a fixed list. See: sensei args <tool>   ·   C-s H\n\n'
+  printf '  Tab-completion that asks each tool about itself — dynamically, for\n'
+  printf '  anything on PATH, not a fixed list — and a temporary completion menu\n'
+  printf '  instead of a permanent scrollback dump for tools with many flags.\n'
+  printf '  See: sensei args <tool>   ·   C-s H\n\n'
   _setup_shell_ghosttext_bash
   _setup_shell_ghosttext_zsh
   _setup_shell_complete_bash
   _setup_shell_complete_zsh
+  _setup_shell_menu_bash
+  _setup_shell_menu_zsh
 }
 
 # ── curated cheat sheet ────────────────────────────────────────────────────────
@@ -1405,7 +1450,11 @@ cmd_help() {
                  subcommand, flag, or the value a flag expects — prefilled
                  from what's typed, editable before you look it up
                  Tab       real completion in your shell, once wired by
-                           `sensei setup-shell` (bash + zsh)
+                           `sensei setup-shell` (bash + zsh) — a tool with
+                           hundreds of flags shows as a temporary menu
+                           (zsh) or cycles in place (bash), not a
+                           permanent scrollback dump; also opt-in via
+                           the same setup-shell run
 
   MODES & MISC
     S            toggle synchronize-panes (loud when armed — see README)
