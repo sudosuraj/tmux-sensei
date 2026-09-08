@@ -228,8 +228,8 @@ I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and 
 | `install.sh` / `uninstall.sh` | — | setup / teardown |
 | `local.conf` | `~/.config/tmux/local.conf` | **your** machine-local overrides (created empty, never overwritten) |
 | `burst.conf` | `~/.config/tmux/burst.conf` | **your** recon chains for `sensei burst` (created with no active profile, never overwritten) |
-| `sensei-args.conf` | `~/.config/tmux/sensei-args.conf` | **your** additions to the `sensei args`/`C-s H`/Tab-completion reference (created empty, never overwritten) |
 | — | `~/.config/tmux/local.d/*.conf` | **your** one-file-per-idea experiments (not created by install — `sensei experiment <name>` scaffolds one) |
+| — | `~/.cache/tmux-sensei/toolspecs/` | discovered tool grammars — `sensei args`/`C-s H`/Tab-completion's cache, not a file you edit (see [below](#context-aware-argument-help)) |
 
 ---
 
@@ -347,25 +347,15 @@ Run it again any time you install one of these later — it's idempotent and onl
 
 ### Context-aware argument help
 
-Ghost-text (above) only ever replays what you've typed before — no help the first time you run a tool, or for the one flag in fifty you never remember. This is the other half: a curated **grammar** for common offensive-security tools — tool → subcommand → flag → the value it expects — checked live against whatever you've already typed, so it can answer "what comes next *here*," not "what have I typed before." History stays around (that's what ghost-text is for); it was never the part doing the actual understanding.
+Fully dynamic — no built-in tool list, nothing to configure. Ghost-text (above) only ever replays what you've typed before — no help the first time you run a tool, or for the one flag in fifty you never remember. This is the other half, and there is **no built-in tool list and nothing to configure**: sensei runs `<tool> --help` (falling back to `-h`), parses whatever comes back into flags/subcommands/values, and caches the result. It works on anything already on your `$PATH` — a tool you wrote yourself yesterday included — the moment you use it, not because someone taught sensei its name first.
 
 Three ways in, same engine:
 
-- **Tab, for real, in your shell.** `sensei setup-shell` also wires up bash/zsh programmable completion for every covered tool — press Tab after `nmap -sC -sV -` and you get the tool's actual remaining flags, not filenames in `$PWD`. After `nmap -T`, Tab offers `0 1 2 3 4 5`, because that flag's value is a small closed set, not free text. After `ffuf -w`, Tab falls back to real filename completion, because a wordlist path can't be enumerated.
+- **Tab, for real, in your shell.** `sensei setup-shell` wires up bash's/zsh's **default** completer — `complete -D` / `compdef … -default-` — not a per-tool registration, so there's no list of names to keep in sync: it's simply tried for any command that doesn't already have a completion of its own (a tool with real bash-completion already installed, like `git` or `apt`, keeps using that — this only fills the gap). Press Tab after `nmap -sC -sV -` and you get nmap's actual remaining flags, not filenames in `$PWD`. After `nmap -T`, Tab offers `0 1 2 3 4 5`, because nmap's own help spelled out that it's a small closed set. After `ffuf -w`, Tab falls back to real filename completion, because a wordlist path can't be enumerated. The *first* Tab on a brand-new command probes and parses it — a small, bounded pause (`SENSEI_PROBE_TIMEOUT`, default 2s) — every Tab after that is instant, served from cache.
 - **`C-s H`**, any time, even mid-typing. Pops up prefilled with whatever's (unsent) on the command line in that pane — edit it if the guess is off, hit Enter to look it up, empty line to close.
-- **`sensei args <tool> [args so far...]`** by hand. `sensei args nmap` dumps the whole reference; `sensei args nmap -sC -sV -T` tells you `-T` expects `0-5`.
+- **`sensei args <tool> [args so far...]`** by hand. `sensei args nmap` dumps the whole reference; `sensei args nmap -sC -sV -T` tells you `-T` expects `0-5`. `sensei tools` lists everything sensei has looked at so far; `sensei discover <tool> [sub]` forces a fresh probe (a tool got upgraded and you want its cache rebuilt sooner than the automatic mtime check would catch it).
 
-Covered out of the box: `nmap`, `ffuf`, `gobuster`, `hydra`, `sqlmap`, `nuclei`, `netexec`, `hashcat`, `john`, `curl`, `openssl`, `enum4linux-ng`, `wpscan`, `msfvenom` — curated, not exhaustive, same spirit as `C-s ?`'s cheat sheet. A tool it doesn't know falls back to that tool's own `--help`/`-h`/`man`, so `sensei args` and `C-s H` are never a dead end, just not the curated version.
-
-Teach it your own tools, or extend a built-in one, without touching the script: add lines to `~/.config/tmux/sensei-args.conf` (created empty on install, never touched by updates — same deal as `burst.conf`). Format:
-
-```
-T|tool|one-line summary
-S|tool|subcommand|one-line summary          (only if the tool has subcommands)
-F|tool|subcommand|flags|value|desc|enum
-```
-
-`flags` is comma-joined aliases (`-p,--ports`, no spaces). `value` is `-` for a boolean flag, else a placeholder like `<file>` or `<ports>` — a placeholder containing "file/path/wordlist/basename/output/log/dir" gets real filename Tab-completion automatically. `enum` is a comma list of a flag's actual legal values, only when it's a small closed set (severities, attack modes, ...); leave it empty for free-form values. `subcommand` blank means "valid everywhere on this tool"; a named one merges with the blank-subcommand flags once that subcommand appears on the line. Rows here are additive — reuse a built-in tool's name to bolt more flags onto it, or a new name to teach sensei a tool from scratch (an internal C2, a client's custom script, whatever `nmap`-style grammar you actually run). The installed file ships with a worked example.
+**Honest limits, because "fully dynamic" is a real trade-off, not a free lunch:** parse quality depends entirely on how the tool's own `--help` is formatted. Most modern Go/Python CLI tools (the ffuf/nuclei/gobuster/sqlmap/curl/openssl/docker end of the world) parse cleanly into flags, values, and even enumerated choices. A tool with older or more idiosyncratic hand-written help text (nmap's `-sS/sT/sA: …` slash-grouped notation is the sharpest example sensei has been tested against) degrades gracefully to flag-*names*-only — still enough for Tab to work, just without a clean description/value split. Worst case is no completion offered for a line; there is no tool this makes up a flag for. A probe only ever runs `<tool> --help` or `<tool> -h` (or, for a subcommand, `<tool> <sub> --help`/`-h`) — never through `sudo`, never with any other argument, stdin closed, output timeboxed — close to universal, side-effect-free conventions, but not a guarantee for every binary that might be on your PATH. Exclude a specific tool from ever being probed with `SENSEI_NO_PROBE="tool1 tool2"`.
 
 ---
 
