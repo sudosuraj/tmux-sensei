@@ -16,6 +16,34 @@
 #   sensei findall <session> <pat>  -> grep every pane's scrollback, pick-list of hits
 #   sensei cmdtime <pane_id> <cmd>  -> elapsed time for the pane border
 #   sensei experiment <name>        -> scaffold + open a local.d/ drop-in snippet
+#   sensei args <tool> [args so far...]  -> what comes next: subcommands, flags,
+#                                    value formats — asked to the tool itself,
+#                                    not a database (see ARGUMENT HELP below)
+#   sensei args-popup <pane_id>     -> C-s H: same, in a popup, prefilled from
+#                                    what's currently typed in that pane
+#   sensei discover <tool> [sub]    -> force a fresh probe, ignoring the cache
+#   sensei tools                    -> list every tool sensei has looked at so far
+#   sensei complete ...             -> machine-facing: feeds real Tab-completion,
+#                                    wired up by `sensei setup-shell`
+#
+# ── ARGUMENT HELP (sensei args / C-s H / Tab-completion) ──────────────────────
+# History-based ghost text (setup-shell's ble.sh/zsh-autosuggestions) only ever
+# replays what you've typed before. It has nothing to say about a tool you're
+# using for the first time, or the one flag in fifty you never remember. This
+# is the other half, and it's fully dynamic: no built-in tool list, nothing to
+# maintain, nothing to configure. sensei runs `<tool> --help` (falling back to
+# `-h`), parses whatever comes back into flags/subcommands/values, and caches
+# the result — so it works on anything already on your $PATH, including a
+# tool you wrote yourself yesterday, the moment you use it. Three ways in:
+#   - Tab, for real, in your shell — `sensei setup-shell` wires up bash's/zsh's
+#     DEFAULT completer (not per-tool registration), so it applies to any
+#     command with no completion of its own already.
+#   - `C-s H` — popup, prefilled from what's on the command line right now.
+#   - `sensei args <tool> [...]` by hand, any time.
+# See the ARGUMENT HELP section further down for how the parsing and caching
+# actually work, and its honest limits (a hand-written, irregularly-formatted
+# --help degrades to flag-names-only — still enough for Tab, just no clean
+# description/value split).
 set -u
 TM=(${SENSEI_TMUX:-tmux})          # socket-aware: SENSEI_TMUX="tmux -L lab" for testing
 LOOT="${SENSEI_LOOT:-$HOME/loot}"
@@ -39,6 +67,675 @@ no_traversal() {
     *..*) die "name may not contain '..': $1" ;;
     *\'*) die "name may not contain a single quote: $1" ;;
   esac
+}
+
+# ── argument help: dynamic tool-grammar discovery ─────────────────────────────
+# No built-in tool list, no manual reference file: sensei asks the TOOL, not a
+# database curated ahead of time. `<tool> --help` (falling back to `-h`) gets
+# parsed into the same tiny record format used everywhere else in this
+# engine, cached per (tool, resolved-binary mtime) so the parse runs once per
+# tool per install/upgrade -- not once per keystroke. Subcommand flags are
+# discovered LAZILY: only the subcommand you actually type on the line gets
+# probed, so a tool with a dozen subcommands doesn't cost a dozen subprocess
+# calls the first time you press Tab on it.
+#   T|tool|summary                              -- probed and parsed at all
+#   S|tool|subcommand|summary                    -- a subcommand this tool has
+#   F|tool|subcommand|flags|value|desc|enum       -- a flag (subcommand blank = global)
+# `flags` is comma-joined aliases. `value` is "-" for a boolean flag, else
+# whatever placeholder the tool's own help text used (<file>, string, PEM,
+# ...) -- if it looks path-shaped, Tab falls back to real filename completion
+# for it (see _looks_like_path/cmd_complete). `enum` is a comma list of
+# actual legal values, extracted when the tool's help text spells them out as
+# {a,b,c}, [a|b|c], or (a, b, c) -- empty otherwise.
+#
+# This trades perfect accuracy for zero maintenance and zero blind spots.
+# Well-formatted --help text (most modern Go/Python CLI tools) parses into
+# clean flags + values + even enumerated choices. A tool with idiosyncratic,
+# hand-written help text degrades to flag-NAMES-only -- still enough for Tab
+# to work, just without a clean description/value split. Worst case is no
+# completion offered for a line; there is no tool this fabricates a flag for.
+#
+# Safety: a probe only ever runs `<tool> --help` or `<tool> -h` (or, for a
+# subcommand, `<tool> <sub> --help`/`-h`) -- never through sudo, never with
+# any other argument, stdin closed, output timeboxed (see _run_probe). These
+# are close to universal, side-effect-free conventions, but "close to" isn't
+# "guaranteed" for every binary that might be on your PATH -- exclude a
+# specific tool from ever being probed with SENSEI_NO_PROBE="tool1 tool2".
+SPEC_CACHE="${SENSEI_SPEC_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/tmux-sensei/toolspecs}"
+PROBE_TIMEOUT="${SENSEI_PROBE_TIMEOUT:-2}"
+NO_PROBE="${SENSEI_NO_PROBE:-}"
+
+_no_probe() {  # $1=tool -> true if excluded from auto-probing
+  case " ${NO_PROBE//,/ } " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+
+# portable bounded-time run -- no dependency on GNU coreutils' `timeout`
+# (absent on stock macOS): backgrounds the command, races a watchdog that
+# kills it after PROBE_TIMEOUT seconds, and returns whatever it printed
+# either way, so one hung/interactive tool costs one bounded pause, once,
+# ever (the empty/partial result still gets cached -- see _ensure_top_cache).
+_run_probe() {
+  local out; out="$(mktemp "${TMPDIR:-/tmp}/sensei-probe.XXXXXX")" || return 1
+  ( "$@" </dev/null >"$out" 2>&1 ) &
+  local pid=$!
+  # poll rather than a "sleep N; kill" watchdog subshell: a shell blocked
+  # synchronously inside its OWN child's wait() defers an incoming SIGTERM
+  # until that child (sleep) finishes on its own, so an "early" kill of a
+  # two-command watchdog subshell silently waits out the full timeout anyway
+  # -- a real, well-known bash trap. `wait -n` sidesteps it too but needs
+  # bash 4.3+; this polls instead so it still works on macOS's stock 3.2.
+  local ticks=0 max=$((PROBE_TIMEOUT * 5))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$ticks" -ge "$max" ]; then kill -TERM "$pid" 2>/dev/null; break; fi
+    sleep 0.2
+    ticks=$((ticks + 1))
+  done
+  # SIGTERM is a request, not a guarantee -- a tool that traps or ignores it
+  # (or is itself stuck uninterruptibly) would otherwise hang this probe
+  # indefinitely despite the "timeout" above. Give it a short grace period
+  # to exit cleanly, then SIGKILL, which a process cannot trap or ignore.
+  if kill -0 "$pid" 2>/dev/null; then
+    local grace=0
+    while [ "$grace" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.2
+      grace=$((grace + 1))
+    done
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null
+  cat "$out"; rm -f "$out"
+}
+
+_probe_help() {  # $1=tool [$2=subcommand] -> raw help text on stdout
+  local tool="$1" sub="${2:-}" out
+  if [ -n "$sub" ]; then out="$(_run_probe "$tool" "$sub" --help)"
+  else out="$(_run_probe "$tool" --help)"; fi
+  if [ -z "$out" ]; then
+    if [ -n "$sub" ]; then out="$(_run_probe "$tool" "$sub" -h)"
+    else out="$(_run_probe "$tool" -h)"; fi
+  fi
+  # some tools (curl among them) print a short default help and hint at a
+  # fuller one in quotes, e.g. `"--help all"` -- follow that hint once when
+  # present. General convention-following, not tool-specific: it's the same
+  # thing a human does after reading the short version and noticing the hint.
+  local hint hints
+  hints="$(printf '%s\n' "$out" | grep -oE '"-{1,2}h(elp)?[a-z-]*( [a-z]+)?"' | tr -d '"')"
+  # several such hints can appear (curl's own help mentions both "--help
+  # category" and "--help all") -- prefer one that says "all" (a reasonable
+  # general signal for "the complete list", not just curl's convention),
+  # else take the last one mentioned, usually the most-complete by convention.
+  hint="$(printf '%s\n' "$hints" | grep -E '(^| )all$' | head -1)"
+  [ -z "$hint" ] && hint="$(printf '%s\n' "$hints" | tail -1)"
+  if [ -n "$hint" ]; then
+    local fuller
+    if [ -n "$sub" ]; then fuller="$(_run_probe "$tool" "$sub" $hint)"
+    else fuller="$(_run_probe "$tool" $hint)"; fi
+    [ -n "$fuller" ] && out="$fuller"
+  fi
+  printf '%s' "$out"
+}
+
+# ---- the parser: two tiers, both tested against real --help output from a
+# handful of very differently-formatted tools (curl, nmap, openssl, docker,
+# python3) before ever shipping. Tier 1 trusts a real column gap (2+ spaces)
+# between the flag cluster and its description -- true for most GNU-getopt,
+# argparse, Cobra/pflag, and optparse-generated help text. Tier 2 is the
+# fallback when a line doesn't fit that shape (no gap at all, or an
+# overlong flag/value that blew through the column): grab just the leading
+# flag token(s) -- greedily following comma- or slash-joined aliases too, so
+# "-E, --cert ..." and "-sS/sT/sA: ..." style lines still yield every alias
+# -- and take the remainder of the line as description, no value/enum split.
+_flags_awk_src() {
+cat <<'AWKEOF'
+function extract_enum(desc,    e) {
+  e = ""
+  if (match(desc, /\{[^}]+\}/)) {
+    e = substr(desc, RSTART + 1, RLENGTH - 2)
+    gsub(/[ \t]/, "", e)
+  } else if (match(desc, /\[[A-Za-z0-9_|-]+\|[A-Za-z0-9_|-]+([|][A-Za-z0-9_-]+)*\]/)) {
+    e = substr(desc, RSTART + 1, RLENGTH - 2)
+    gsub(/\|/, ",", e)
+  } else if (match(desc, /\(([A-Za-z0-9_-]+, ?){1,}[A-Za-z0-9_-]+\)/)) {
+    e = substr(desc, RSTART + 1, RLENGTH - 2)
+    gsub(/[ \t]/, "", e)
+  }
+  return e
+}
+# a bare numeric range as the whole value token (nmap's own "-T<0-5>:" is
+# the case this exists for) is as much an enumerable closed set as a
+# {choices} list -- just spelled as bounds instead of a literal list.
+# Capped so a value that only LOOKS like a range (e.g. a port range someone
+# wrote as 1-65535) doesn't get expanded into 65000 fake candidates.
+function expand_numeric_range(tok,    b, lo, hi, i, r) {
+  if (tok !~ /^[0-9][0-9]?[0-9]?-[0-9][0-9]?[0-9]?$/) return ""
+  split(tok, b, "-")
+  lo = b[1] + 0; hi = b[2] + 0
+  if (lo >= hi || (hi - lo) > 20) return ""
+  r = lo
+  for (i = lo + 1; i <= hi; i++) r = r "," i
+  return r
+}
+# a value hint that's itself a bare "A|B|C" alternation (e.g. openssl's own
+# "-inform PEM|DER") is a real enum handed to us for free -- promote it. The
+# "|" is always neutralized in the displayed value either way, since a
+# literal "|" would otherwise corrupt this data format's own field separator.
+function fold_value_into_enum(value, enumv,    v) {
+  if (enumv == "" && value ~ /^<[A-Za-z0-9_-]+(\|[A-Za-z0-9_-]+)+>$/) {
+    v = value
+    gsub(/^<|>$/, "", v)
+    enumv = v
+    gsub(/\|/, ",", enumv)
+  }
+  gsub(/\|/, "/", value)
+  return value SUBSEP enumv
+}
+function emit(flags, value, desc, enumv,    folded) {
+  if (flags == "") return
+  folded = fold_value_into_enum(value, enumv)
+  value = substr(folded, 1, index(folded, SUBSEP) - 1)
+  enumv = substr(folded, index(folded, SUBSEP) + 1)
+  gsub(/\|/, "/", flags); gsub(/\t/, " ", flags)
+  gsub(/\|/, "/", desc); gsub(/\t/, " ", desc)
+  gsub(/^[ :.\-]+/, "", desc); gsub(/[ \t]+$/, "", desc)
+  gsub(/\|/, ",", enumv); gsub(/\t/, " ", enumv)
+  printf "F|%s|%s|%s|%s|%s|%s\n", TOOL, SUB, flags, value, desc, enumv
+}
+{
+  line = $0
+  gsub(/\r$/, "", line)
+  trimmed = line
+  gsub(/^[ \t]+/, "", trimmed); gsub(/[ \t]+$/, "", trimmed)
+  if (trimmed == "") next
+  if (substr(trimmed, 1, 1) != "-") next
+
+  n = split(trimmed, segs, /  +/)
+  head = trimmed; desc = ""
+  if (n >= 2) {
+    desc = segs[n]
+    head = segs[1]
+    for (i = 2; i < n; i++) head = head "  " segs[i]
+  }
+
+  ok = 1; flags = ""; value = "-"
+  m = split(head, pieces, ",")
+  for (i = 1; i <= m; i++) {
+    p = pieces[i]
+    gsub(/^[ \t]+/, "", p); gsub(/[ \t]+$/, "", p)
+    if (p == "") continue
+    if (match(p, /^--?[A-Za-z0-9][A-Za-z0-9-]*/)) {
+      fl = substr(p, RSTART, RLENGTH)
+      trail = substr(p, RSTART + RLENGTH)
+      gsub(/^[ \t]+/, "", trail)
+      flags = (flags == "" ? fl : flags "," fl)
+      if (trail != "") {
+        v = trail
+        gsub(/^[<\[]/, "", v); gsub(/[>\]]$/, "", v)
+        if (v != "") value = "<" v ">"
+      }
+    } else { ok = 0; break }
+  }
+
+  if (n >= 2 && ok && flags != "") { emit(flags, value, desc, extract_enum(desc)); next }
+
+  if (match(trimmed, /^--?[A-Za-z0-9]([A-Za-z0-9\/-]*[A-Za-z0-9])?/)) {
+    cluster = substr(trimmed, RSTART, RLENGTH)
+    rest = substr(trimmed, RSTART + RLENGTH)
+    flags = ""
+    m = split(cluster, parts, "/")
+    for (i = 1; i <= m; i++) {
+      p = parts[i]
+      if (p == "") continue
+      if (substr(p, 1, 1) != "-") p = "-" p
+      if (p ~ /^--?[A-Za-z0-9][A-Za-z0-9-]*$/) flags = (flags == "" ? p : flags "," p)
+    }
+
+    value = "-"; enumv = ""
+    # a value glued directly onto the flag with no space at all -- nmap's
+    # own "-T<0-5>:" is exactly this. If it's there, it's the whole answer;
+    # a real second alias is comma/slash-joined text, never bracketed, so
+    # there's nothing to gain by also trying the continuation loop below.
+    if (match(rest, /^[<{\[][^ \t]+[>}\]]/)) {
+      vtok = substr(rest, RSTART, RLENGTH)
+      rest = substr(rest, RSTART + RLENGTH)
+      inner = substr(vtok, 2, length(vtok) - 2)
+      value = "<" inner ">"
+      enumv = extract_enum(vtok)
+      if (enumv == "") enumv = expand_numeric_range(inner)
+    } else {
+      more = 1
+      while (more) {
+        more = 0
+        if (match(rest, /^,[ \t]*--?[A-Za-z0-9][A-Za-z0-9-]*/)) {
+          extra = substr(rest, RSTART, RLENGTH); gsub(/^,[ \t]*/, "", extra)
+          flags = flags "," extra
+          rest = substr(rest, RSTART + RLENGTH)
+          more = 1
+        } else if (match(rest, /^\/-?[A-Za-z0-9][A-Za-z0-9]*/)) {
+          extra = substr(rest, RSTART, RLENGTH); sub(/^\//, "", extra)
+          if (substr(extra, 1, 1) != "-") extra = "-" extra
+          flags = flags "," extra
+          rest = substr(rest, RSTART + RLENGTH)
+          more = 1
+        } else if (match(rest, /^[ \t]+[A-Za-z_][A-Za-z0-9_]*,[ \t]*--?[A-Za-z0-9][A-Za-z0-9-]*/)) {
+          # argparse's own convention: "-o OUTPUT, --output OUTPUT" -- a
+          # bare word directly after the flag, THEN a comma-joined alias,
+          # is a repeated metavar (the value), not a second flag.
+          full = substr(rest, RSTART, RLENGTH)
+          if (value == "-" && match(full, /[A-Za-z_][A-Za-z0-9_]*/)) {
+            value = "<" substr(full, RSTART, RLENGTH) ">"
+          }
+          if (match(full, /--?[A-Za-z0-9][A-Za-z0-9-]*$/)) {
+            flags = flags "," substr(full, RSTART, RLENGTH)
+          }
+          rest = substr(rest, RSTART + RLENGTH)
+          more = 1
+        }
+      }
+    }
+    gsub(/^[ \t:.,\[\]]+/, "", rest)
+    gsub(/[ \t]+$/, "", rest)
+    # argparse repeats the metavar after every alias ("-o OUTPUT, --output
+    # OUTPUT") -- once that's captured as the value, a leftover trailing
+    # copy of the exact same word is not a description, just noise.
+    valinner = value; gsub(/^<|>$/, "", valinner)
+    if (rest == valinner) rest = ""
+    if (enumv == "") enumv = extract_enum(rest)
+    if (flags != "") emit(flags, value, rest, enumv)
+  }
+}
+AWKEOF
+}
+
+# subcommand-list detection: a literal "Commands:"/"Available Commands:"
+# header with indented "name  description" lines under it (Cobra/Click), OR
+# an argparse-style "{a,b,c}" brace choice-set appearing anywhere -- prints
+# "name<TAB>desc" candidates, best-effort, silent (no output) if neither
+# convention is used (this is exactly what a hand-written-prose tool like
+# git looks like to this parser: nothing, not a wrong guess).
+_subs_awk_src() {
+cat <<'AWKEOF'
+BEGIN { insection = 0 }
+{
+  line = $0
+  gsub(/\r$/, "", line)
+  if (line ~ /^[A-Za-z ]*[Cc]ommands:[ \t]*$/) { insection = 1; next }
+  if (insection) {
+    if (line ~ /^[ \t]*$/) { insection = 0; next }
+    if (line !~ /^[ \t]/) { insection = 0 }
+    else {
+      t = line
+      gsub(/^[ \t]+/, "", t)
+      if (match(t, /^[A-Za-z][A-Za-z0-9_-]*\*?/)) {
+        name = substr(t, RSTART, RLENGTH); gsub(/\*$/, "", name)
+        rest = substr(t, RSTART + RLENGTH); gsub(/^[ \t]+/, "", rest)
+        print name "\t" rest
+      }
+      next
+    }
+  }
+  # a {a,b,c} brace set is only a SUBCOMMAND selector on argparse's own
+  # positional-argument/usage syntax -- the exact same brace syntax also
+  # shows up as an ORDINARY FLAG's value choices, e.g. a usage synopsis
+  # "[--level {debug,info,warn,error}]" or the flag's own definition line
+  # "--level {debug,info,warn,error}" -- and that is not a subcommand list.
+  # Distinguish them by what's immediately before the brace on this line:
+  # a flag-associated one is directly preceded by "-x"/"--flag" (with only
+  # optional "[ " between); a genuine subcommand selector isn't (netexec's
+  # own "prog [-h] {smb,winrm,...}" has a *closing* "]" in the way instead).
+  if (match(line, /\{[A-Za-z0-9_,-]+,[A-Za-z0-9_,-]+\}/)) {
+    pre = substr(line, 1, RSTART - 1)
+    if (pre !~ /--?[A-Za-z][A-Za-z0-9_-]*[ \t]*\[?[ \t]*$/) {
+      inner = substr(line, RSTART + 1, RLENGTH - 2)
+      ncand = split(inner, cs, ",")
+      for (i = 1; i <= ncand; i++) if (cs[i] != "") print cs[i] "\t"
+      next
+    }
+  }
+
+  # signal C: a dense multi-column NAME GRID with no per-item description --
+  # openssl's own convention ("Standard commands" / "Cipher commands", no
+  # colon, then several lines that are nothing but 2+-space-packed bare
+  # identifiers). Every token on the line has to look like a name for this
+  # to fire, so ordinary prose essentially never qualifies by accident.
+  if (line !~ /^-/ && line ~ /^[a-z]/) {
+    gridline = line
+    gsub(/[ \t]+$/, "", gridline)
+    ncols = split(gridline, cols, /  +/)
+    if (ncols >= 2) {
+      allnames = 1
+      for (i = 1; i <= ncols; i++) {
+        c = cols[i]; gsub(/^[ \t]+/, "", c); gsub(/[ \t]+$/, "", c)
+        if (c !~ /^[a-z][a-z0-9_-]*$/) { allnames = 0; break }
+      }
+      if (allnames) {
+        for (i = 1; i <= ncols; i++) {
+          c = cols[i]; gsub(/^[ \t]+/, "", c); gsub(/[ \t]+$/, "", c)
+          if (c != "") print c "\t"
+        }
+      }
+    }
+  }
+}
+AWKEOF
+}
+
+_parse_flags() { awk -v TOOL="$1" -v SUB="$2" "$(_flags_awk_src)"; }   # help text on stdin
+_parse_subs()  { awk "$(_subs_awk_src)"; }                              # help text on stdin
+
+# a stable, filesystem-safe cache key for a resolved binary -- basename plus
+# a short checksum (cksum, POSIX, no new dependency) of the full path, so two
+# different binaries sharing a basename (a project-local ./nmap wrapper vs
+# /usr/bin/nmap) never collide.
+_cache_key() {
+  local base="${1##*/}" h
+  h="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+  printf '%s_%s' "$base" "$h"
+}
+
+_ensure_top_cache() {  # $1=tool -> prints the cache FILE PATH
+  local tool="$1"
+  local bin; bin="$(command -v "$tool" 2>/dev/null)" || return 1
+  local key; key="$(_cache_key "$bin")"
+  local f="$SPEC_CACHE/${key}.top"
+  local mt; mt="$(_mtime "$bin")"
+  if [ -f "$f" ] && [ "$(head -1 "$f" 2>/dev/null)" = "# mtime:$mt" ]; then
+    printf '%s' "$f"; return 0
+  fi
+  mkdir -p "$SPEC_CACHE"
+  # a unique temp name (not a fixed "$f.tmp") -- two sensei invocations
+  # racing to discover the same not-yet-cached tool at once (two panes, or
+  # a shell and the C-s H popup) would otherwise open and write the same
+  # path independently, and whichever `mv` lands last could publish a
+  # torn/interleaved file for the other to read mid-write.
+  local tmp; tmp="$(mktemp "${f}.XXXXXX")" || return 1
+  {
+    printf '# mtime:%s\n' "$mt"
+    if _no_probe "$tool"; then
+      printf 'T|%s|(SENSEI_NO_PROBE excludes this tool from auto-discovery)\n' "$tool"
+    else
+      local help; help="$(_probe_help "$tool")"
+      if [ -n "$help" ]; then
+        local summary; summary="$(printf '%s\n' "$help" | awk 'NF{print; exit}' | cut -c1-100 | tr '|' '/')"
+        printf 'T|%s|%s\n' "$tool" "${summary:-$tool}"
+        printf '%s\n' "$help" | _parse_flags "$tool" ""
+        printf '%s\n' "$help" | _parse_subs | awk -F'\t' -v t="$tool" '
+          { n=$1; d=$2; gsub(/\|/,"/",n); gsub(/\|/,"/",d); gsub(/\t/," ",d); print "S|" t "|" n "|" d }'
+      else
+        printf 'T|%s|%s\n' "$tool" "$tool"
+      fi
+    fi
+  } > "$tmp" && mv "$tmp" "$f"
+  printf '%s' "$f"
+}
+
+_ensure_sub_cache() {  # $1=tool $2=sub -> prints the cache FILE PATH
+  local tool="$1" sub="$2"
+  local bin; bin="$(command -v "$tool" 2>/dev/null)" || return 1
+  local key; key="$(_cache_key "$bin")"
+  local safesub; safesub="$(printf '%s' "$sub" | tr -c 'A-Za-z0-9_-' '_')"
+  local f="$SPEC_CACHE/${key}__${safesub}.sub"
+  local mt; mt="$(_mtime "$bin")"
+  if [ -f "$f" ] && [ "$(head -1 "$f" 2>/dev/null)" = "# mtime:$mt" ]; then
+    printf '%s' "$f"; return 0
+  fi
+  mkdir -p "$SPEC_CACHE"
+  local tmp; tmp="$(mktemp "${f}.XXXXXX")" || return 1
+  {
+    printf '# mtime:%s\n' "$mt"
+    if ! _no_probe "$tool"; then
+      local help; help="$(_probe_help "$tool" "$sub")"
+      [ -n "$help" ] && printf '%s\n' "$help" | _parse_flags "$tool" "$sub"
+    fi
+  } > "$tmp" && mv "$tmp" "$f"
+  printf '%s' "$f"
+}
+
+# the merged view for tool[/sub]: top-level (summary + global flags +
+# known subcommand names) always; that ONE subcommand's own flags too, but
+# only when asked for -- this is what keeps discovery lazy.
+_spec_blob_for() {  # $1=tool $2=sub(may be empty)
+  local tool="$1" sub="$2" f
+  f="$(_ensure_top_cache "$tool")" || return 1
+  [ -n "$f" ] && cat "$f"
+  if [ -n "$sub" ]; then
+    local sf; sf="$(_ensure_sub_cache "$tool" "$sub")"
+    [ -n "$sf" ] && cat "$sf"
+  fi
+}
+
+_spec_have_tool() { command -v "$1" >/dev/null 2>&1; }
+_spec_is_sub() {      # $1=tool $2=word
+  _spec_blob_for "$1" "" | awk -F'|' -v s="$2" '$1=="S" && $3==s {f=1} END{exit !f}'
+}
+_spec_tool_summary() { _spec_blob_for "$1" "" | awk -F'|' '$1=="T"{print $3; exit}'; }
+_spec_subs() { _spec_blob_for "$1" "" | awk -F'|' '$1=="S"{print $3"\t"$4}'; }
+_spec_flags_expanded() {  # $1=tool $2=sub(may be empty) -> "alias<TAB>value<TAB>desc<TAB>enum"
+  _spec_blob_for "$1" "$2" | awk -F'|' '
+    $1=="F" { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i]"\t"$5"\t"$6"\t"$7 }'
+}
+_spec_flag_value() {  # $1=tool $2=sub $3=flag -> "value<TAB>enum" if $3 is a known value-taking flag
+  _spec_blob_for "$1" "$2" | awk -F'|' -v f="$3" '
+    $1=="F" { n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == f) { print $5"\t"$7; exit } }'
+}
+
+cmd_discover() {  # sensei discover <tool> [sub] -- force a fresh probe+parse
+  local tool="${1:?tool}" sub="${2:-}"
+  _spec_have_tool "$tool" || die "not found on PATH: $tool"
+  rm -f "$SPEC_CACHE/$(_cache_key "$(command -v "$tool")")"*
+  _ensure_top_cache "$tool" >/dev/null
+  [ -n "$sub" ] && _ensure_sub_cache "$tool" "$sub" >/dev/null
+  say "re-discovered $tool${sub:+ $sub}"
+}
+
+cmd_tools() {  # sensei tools -- what sensei has already discovered
+  [ -d "$SPEC_CACHE" ] || { say "nothing discovered yet — Tab-complete or run \`sensei args <tool>\` on something"; return 0; }
+  local f name
+  for f in "$SPEC_CACHE"/*.top; do
+    [ -e "$f" ] || continue
+    name="$(awk -F'|' '$1=="T"{print $2; exit}' "$f")"
+    printf '%s\n' "${name:-${f##*/}}"
+  done | sort -u
+}
+
+# skip a wrapper prefix (sudo nmap ..., proxychains curl ...) so word[$off] is
+# the actual tool being looked up, not the thing running it
+_spec_skip_wrappers() {  # prints the index of the real tool word, given argv words on stdin (one per line) up to a bound
+  local bound="$1"; shift
+  local off=0 w
+  while [ "$off" -lt "$bound" ]; do
+    w="${1:-}"; shift || true
+    case "$w" in sudo|doas|proxychains|proxychains4) off=$((off+1)) ;; *) break ;; esac
+  done
+  printf '%s' "$off"
+}
+
+# does the FLAG placeholder text look like a path? (wordlist, output file,
+# basename, logfile, ...) — used to fall back to real filename completion for
+# a value we can't enumerate, instead of offering nothing on Tab. Case-
+# insensitive: a discovered metavar's casing is whatever the tool's own
+# --help used (FILE, File, file, ...), not something sensei controls anymore.
+_looks_like_path() {
+  case "${1,,}" in *file*|*path*|*wordlist*|*basename*|*output*|*log*|*dir*) return 0 ;; *) return 1 ;; esac
+}
+
+# best-effort: which subcommand (if any) has already been typed among
+# words[start..end) — prints it, empty if none/tool has no subcommands
+_spec_chosen_sub() {  # $1=tool $2=start $3=end -- word0 word1 ...
+  local tool="$1" start="$2" end="$3"; shift 3
+  local -a w=("$@")
+  local i
+  for ((i = start; i < end; i++)); do
+    if _spec_is_sub "$tool" "${w[$i]}"; then printf '%s' "${w[$i]}"; return; fi
+  done
+}
+
+# ── sensei args — human-facing: what comes next, right now ────────────────────
+# `sensei args nmap -sC -sV -` and `sensei args nmap` both work; so does a
+# single quoted string (that's what the C-s H popup passes). First call for a
+# given tool triggers its (cached-after-this) --help probe -- see
+# _ensure_top_cache -- so this can take a moment the very first time.
+cmd_args() {
+  [ "$#" -ge 1 ] || die "usage: sensei args <tool> [args typed so far...]"
+  local -a words
+  if [ "$#" -eq 1 ]; then read -r -a words <<< "$1"; else words=("$@"); fi
+  local n="${#words[@]}"
+  [ "$n" -gt 0 ] || die "nothing to look up"
+
+  local off; off=$(_spec_skip_wrappers "$n" "${words[@]}")
+  local tool="${words[$off]:-}"
+  [ -n "$tool" ] || die "nothing to look up (just a wrapper prefix, no tool named)"
+
+  _spec_have_tool "$tool" || die "not found on PATH: $tool"
+
+  if [ -z "$(_spec_flags_expanded "$tool" "")" ] && [ -z "$(_spec_subs "$tool")" ]; then
+    local summary; summary="$(_spec_tool_summary "$tool")"
+    if [ "$summary" = "$tool" ]; then
+      # _ensure_top_cache's own sentinel for "genuinely no output at all" --
+      # already established during discovery, so there's nothing new a
+      # second probe would find. Don't pay for one (a tool that hangs or
+      # traps signals already cost the discovery probe its full bounded
+      # timeout once; re-probing here would be that cost again for nothing).
+      printf '  %s is on PATH, but --help/-h produced no output at all.\n' "$tool"
+    else
+      printf '  %s is on PATH, but --help/-h came back in a shape this parser\n' "$tool"
+      printf '  could not make sense of. Its raw output:\n\n'
+      _probe_help "$tool"
+    fi
+    return 0
+  fi
+
+  printf '  %s — %s\n' "$tool" "$(_spec_tool_summary "$tool")"
+
+  local sub; sub=$(_spec_chosen_sub "$tool" "$((off+1))" "$n" "${words[@]}")
+  [ -n "$sub" ] && printf '  subcommand: %s\n' "$sub"
+  if [ "$n" -gt "$((off+1))" ]; then
+    printf '  already typed: %s\n' "${words[*]:$((off+1))}"
+  fi
+
+  # last word is a KNOWN flag that takes a value -> that's the whole answer;
+  # anything else on the line right now is a distraction, don't list it too
+  local last="" vinfo="" filter="" awaiting_value=0
+  if [ "$n" -gt "$((off+1))" ]; then
+    last="${words[$((n-1))]}"
+    vinfo=$(_spec_flag_value "$tool" "$sub" "$last")
+    if [ -n "$vinfo" ]; then
+      local val="${vinfo%%$'\t'*}" enum="${vinfo#*$'\t'}"
+      if [ "$val" != "-" ]; then
+        awaiting_value=1
+        printf '  \xe2\x80\xba %s expects %s\n' "$last" "$val"
+        [ -n "$enum" ] && printf '    one of: %s\n' "${enum//,/, }"
+      else
+        # a complete, recognized flag that reads as boolean -- show its own
+        # description (this is also what a value-taking flag looks like when
+        # the source --help was too irregular for tier 1 to split the value
+        # out; see the parser comment above) before falling through to "what
+        # else can I add", so that degraded case isn't just silently dropped.
+        local own; own=$(_spec_flags_expanded "$tool" "$sub" | awk -F'\t' -v f="$last" '$1==f{print $3; exit}')
+        [ -n "$own" ] && printf '  \xe2\x80\xba %s: %s\n' "$last" "$own"
+      fi
+    else
+      case "$last" in -*) filter="$last" ;; esac
+    fi
+  fi
+  [ "$awaiting_value" -eq 1 ] && return 0
+  printf '\n'
+
+  # no subcommand chosen yet, and there's more than one -> list them
+  if [ -z "$sub" ]; then
+    local subs; subs=$(_spec_subs "$tool")
+    if [ -n "$subs" ]; then
+      printf '  subcommands:\n'
+      printf '%s\n' "$subs" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
+      printf '\n'
+    fi
+  fi
+
+  printf '  flags%s%s:\n' "${sub:+ ($sub)}" "${filter:+ matching \"$filter\"}"
+  _spec_flags_expanded "$tool" "$sub" | awk -F'\t' -v pfx="$filter" '
+    pfx == "" || index($1, pfx) == 1 {
+      v = ($2 == "-") ? "" : $2
+      printf "    %-16s %-18s %s\n", $1, v, $3
+    }'
+}
+
+# ── sensei args-popup — C-s H: same thing, live, prefilled from the pane ──────
+# Best-effort capture of the CURRENT (unsent) line in a pane, so "what comes
+# next" can be asked about whatever you're mid-typing without leaving the
+# keyboard to retype it. Never sends anything anywhere — pure lookup, same
+# Law #3 spirit as `burst`: sensei reads what you typed, it doesn't act on it.
+cmd_lastline() {
+  local pane="${1:?pane_id}"
+  # the line you're mid-typing is wherever the CURSOR is, not "the last line
+  # of the pane" — capture-pane's line numbering runs negative into scrollback
+  # above the visible area and can run past the prompt into blank space below
+  # it too, so target the cursor's row explicitly rather than guess an offset.
+  local y; y=$("${TM[@]}" display-message -p -t "$pane" '#{cursor_y}' 2>/dev/null)
+  local line
+  if [ -n "$y" ]; then
+    line=$("${TM[@]}" capture-pane -p -t "$pane" -S "$y" -E "$y" 2>/dev/null)
+  else
+    line=$("${TM[@]}" capture-pane -p -t "$pane" 2>/dev/null | tail -1)
+  fi
+  # strip a shell-prompt prefix ending in $/#/> + space. Anchored on the LAST
+  # such marker (greedy match) so a command that itself contains one --
+  # `curl url?a=1#frag`, `echo $HOME` -- isn't mistaken for the prompt boundary.
+  printf '%s' "$line" | sed -E 's/^.*[$#>] //'
+}
+
+cmd_args_popup() {
+  local pane="${1:?pane_id}"
+  local pre; pre="$(cmd_lastline "$pane")"
+  local line
+  printf '  sensei args — edit the line, Enter to look up, empty line to close\n\n'
+  while IFS= read -r -e -p '  args> ' -i "$pre" line; do
+    [ -n "$line" ] || break
+    printf '\n'
+    cmd_args "$line" 2>&1 | less
+    pre="$line"
+  done
+}
+
+# ── sensei complete — machine-facing: feeds real shell Tab-completion ─────────
+# Called by the bash/zsh completion functions `sensei setup-shell` wires up.
+# Prints one candidate per line as "token<TAB>description" (bash keeps just the
+# token; zsh's wrapper uses both for a described menu). A lone `@@FILE@@` line
+# means "fall back to normal filename completion" — used for value slots whose
+# format is a path we can't otherwise enumerate.
+cmd_complete() {
+  local cword="${1:?cword}"; shift
+  local -a words=("$@")
+  local n="${#words[@]}"
+  [ "$cword" -ge 0 ] && [ "$cword" -lt "$n" ] || return 0
+  local cur="${words[$cword]}"
+
+  local off; off=$(_spec_skip_wrappers "$cword" "${words[@]}")
+  local tool="${words[$off]:-}"
+  [ -n "$tool" ] && _spec_have_tool "$tool" || return 0
+
+  local sub; sub=$(_spec_chosen_sub "$tool" "$((off+1))" "$cword" "${words[@]}")
+
+  if [ "$cword" -gt "$off" ]; then
+    local prev="${words[$((cword-1))]}"
+    local vinfo; vinfo=$(_spec_flag_value "$tool" "$sub" "$prev")
+    if [ -n "$vinfo" ]; then
+      local val="${vinfo%%$'\t'*}" enum="${vinfo#*$'\t'}"
+      if [ "$val" != "-" ]; then
+        if [ -n "$enum" ]; then
+          printf '%s\n' "${enum//,/$'\n'}" | awk -v cur="$cur" 'index($0,cur)==1{print $0"\t"}'
+        elif _looks_like_path "$val"; then
+          printf '@@FILE@@\n'
+        fi
+        return 0
+      fi
+    fi
+  fi
+
+  {
+    [ -z "$sub" ] && _spec_subs "$tool"
+    _spec_flags_expanded "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
+  } | awk -F'\t' -v cur="$cur" 'index($1, cur) == 1'
 }
 
 # ── vpn/iface indicator ───────────────────────────────────────────────────────
@@ -455,9 +1152,7 @@ cmd_experiment() {
 # the right-arrow to accept. tmux can't do this (it's a shell feature), so this
 # sets it up for you. bash gets prefix history-search as a fallback. Opt-in only:
 # it never changes your login shell without asking.
-cmd_setup_shell() {
-  printf '\n  This configures your SHELL (not tmux) for live history autosuggestions.\n\n'
-
+_setup_shell_ghosttext_bash() {
   # bash: look for ble.sh first — it's the real thing (per-keystroke ghost
   # text from history that updates on every letter you type, right-arrow/End
   # to accept, same feel as fish/zsh-autosuggestions). Prefix history-search
@@ -497,7 +1192,9 @@ cmd_setup_shell() {
     printf '    make -C ~/.local/src/ble.sh install PREFIX=~/.local\n'
     printf '  then re-run: sensei setup-shell\n\n'
   fi
+}
 
+_setup_shell_ghosttext_zsh() {
   # zsh-autosuggestions: the real Fish-style ghost text
   if ! command -v zsh >/dev/null 2>&1; then
     printf '  For Fish-style ghost-text suggestions, install zsh:\n'
@@ -539,6 +1236,132 @@ cmd_setup_shell() {
   fi
 }
 
+# write $3 into $1 between a pair of "# >>> tmux-sensei:$2 >>>" / "<<<" marker
+# comments, replacing a previous block with the same marker if one exists —
+# so re-running `sensei setup-shell` after a script update cleanly replaces
+# an older version of this block instead of leaving a stale duplicate, unlike
+# the ghost-text sections' simpler once-only append above.
+_write_block() {  # $1=file $2=marker $3=content
+  local f="$1" marker="$2" content="$3"
+  local begin="# >>> tmux-sensei:$marker >>>" end="# <<< tmux-sensei:$marker <<<"
+  if grep -qsF "$begin" "$f"; then
+    # mktemp defaults to mode 600 -- an rc file is typically 644, and mv'ing
+    # a fresh mktemp file over it would silently strip group/other read
+    # access on every re-run of `sensei setup-shell`. Match the original
+    # file's mode (falling back to a sane 644 if that lookup ever fails)
+    # before the replace, not after -- mv is atomic, chmod-after-mv is not.
+    local mode; mode="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f" 2>/dev/null)"
+    local tmp; tmp="$(mktemp "${f}.XXXXXX")"
+    chmod "${mode:-644}" "$tmp" 2>/dev/null
+    awk -v b="$begin" -v e="$end" '$0==b{skip=1} !skip{print} $0==e{skip=0}' "$f" > "$tmp" && mv "$tmp" "$f"
+  fi
+  printf '\n%s\n%s\n%s\n' "$begin" "$content" "$end" >> "$f"
+}
+
+# ── argument Tab-completion: real, dynamic, applies to anything on PATH ───────
+# The ghost-text above only ever replays what you've typed before. This wires
+# actual shell programmable completion to `sensei complete` (see the ARGUMENT
+# HELP comment near the top of this file), registered as the FALLBACK
+# completer — bash's `complete -D`, zsh's `-default-` — not per-command like
+# a normal `complete -F func git` would be, so there is no list of tool names
+# to keep in sync here: it's tried for any command that doesn't already have
+# its own completion, which is every offensive-security tool that doesn't
+# ship one, without sensei needing to know its name in advance. A command
+# that DOES already have a real completion registered (git, docker, apt, via
+# your distro's bash-completion package) keeps using that instead — this
+# only fills the gap, it doesn't fight anything already working.
+_setup_shell_complete_bash() {
+  local br="$HOME/.bashrc"; touch "$br"
+  local body
+  body=$(cat <<'EOF'
+# dynamic, tool-agnostic Tab-completion -- asks each command about itself
+# rather than looking it up in a list (see the ARGUMENT HELP comment near
+# the top of the sensei script). Registered with `complete -D`: bash's
+# FALLBACK completer, tried only for a command with no completion of its
+# own already, so this applies to anything on your PATH, not a fixed set.
+# First Tab on a brand-new command probes and caches it (a small one-time
+# pause, bounded by SENSEI_PROBE_TIMEOUT); every Tab after that is instant.
+_sensei_complete() {
+  local out
+  out=$(sensei complete "$COMP_CWORD" "${COMP_WORDS[@]}" 2>/dev/null)
+  if [ "$out" = "@@FILE@@" ]; then
+    COMPREPLY=($(compgen -f -- "${COMP_WORDS[COMP_CWORD]}"))
+    return
+  fi
+  COMPREPLY=($(printf '%s\n' "$out" | cut -f1))
+}
+complete -D -F _sensei_complete -o bashdefault -o default
+EOF
+)
+  _write_block "$br" "complete" "$body"
+  say "Tab-completion wired into ~/.bashrc — works for anything on PATH, not a fixed list"
+}
+
+_setup_shell_complete_zsh() {
+  command -v zsh >/dev/null 2>&1 || return 0
+  local zr="$HOME/.zshrc"; touch "$zr"
+  local body
+  body=$(cat <<'EOF'
+# dynamic, tool-agnostic Tab-completion -- asks each command about itself
+# rather than looking it up in a list (see the ARGUMENT HELP comment near
+# the top of the sensei script). NOT registered via `compdef ... -default-`
+# -- that's the textbook-documented fallback mechanism, but empirically it
+# is never actually reached for a real Tab press in a stock compinit setup
+# (verified with a scripted pty: a -default- completer that calls compadd
+# with a distinctive candidate is simply never invoked; zsh's own _complete
+# resolves an unregistered command straight to file completion first).
+# What DOES work: registering as the FIRST entry in the `completer` zstyle
+# chain, so it's tried before zsh's own dispatch -- it inspects the command
+# itself (via `sensei complete`) and, if it has nothing to offer (command
+# not on PATH, no probeable flags, wrong argument position), returns
+# immediately so the rest of the chain (a tool's own real completion, then
+# ordinary file completion) still runs exactly as before. Any completer
+# list you've already customized (oh-my-zsh, etc.) is preserved, not
+# overwritten -- this only prepends itself, once. Needs compinit already
+# loaded (true for most zsh setups); if Tab does nothing at all, add
+# `autoload -Uz compinit && compinit` above this. First Tab on a brand-new
+# command probes and caches it (a small one-time pause); every Tab after
+# that is instant.
+_sensei_completer() {
+  (( CURRENT > 1 )) || return 1
+  local cword=$((CURRENT - 1))
+  local out; out=$(sensei complete "$cword" "${words[@]}" 2>/dev/null)
+  [[ -n "$out" ]] || return 1
+  if [[ "$out" == "@@FILE@@" ]]; then
+    _files
+    return 0
+  fi
+  local -a cands=()
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    cands+=("${line%%$'\t'*}:${line#*$'\t'}")
+  done <<< "$out"
+  _describe sensei cands
+}
+local -a _sensei_existing_completers
+zstyle -a ':completion:*' completer _sensei_existing_completers 2>/dev/null
+if (( ${_sensei_existing_completers[(I)_sensei_completer]} == 0 )); then
+  [[ ${#_sensei_existing_completers[@]} -eq 0 ]] && _sensei_existing_completers=(_complete _ignored)
+  zstyle ':completion:*' completer _sensei_completer "${_sensei_existing_completers[@]}"
+fi
+unset _sensei_existing_completers
+EOF
+)
+  _write_block "$zr" "complete" "$body"
+  say "Tab-completion wired into ~/.zshrc — works for anything on PATH, not a fixed list"
+}
+
+cmd_setup_shell() {
+  printf '\n  This configures your SHELL (not tmux): live history autosuggestions,\n'
+  printf '  and Tab-completion that asks each tool about itself — dynamically,\n'
+  printf '  for anything on PATH, not a fixed list. See: sensei args <tool>   ·   C-s H\n\n'
+  _setup_shell_ghosttext_bash
+  _setup_shell_ghosttext_zsh
+  _setup_shell_complete_bash
+  _setup_shell_complete_zsh
+}
+
 # ── curated cheat sheet ────────────────────────────────────────────────────────
 # tmux's own `list-keys` dumps every binding in every table, unfiltered — not
 # useful as "what did I actually customize here." This is the thing install.sh
@@ -577,6 +1400,13 @@ cmd_help() {
     i  I         copy tun IP / clickable IP menu   B   numbered paste-buffer picker (last 20)
     F            grep every pane's scrollback in this session
 
+  ARGUMENT HELP — context-aware, not history-based (see `sensei args`)
+    H            popup: what comes next for the command in THIS pane —
+                 subcommand, flag, or the value a flag expects — prefilled
+                 from what's typed, editable before you look it up
+                 Tab       real completion in your shell, once wired by
+                           `sensei setup-shell` (bash + zsh)
+
   MODES & MISC
     S            toggle synchronize-panes (loud when armed — see README)
     M            resync mouse tracking (scroll/click typing gibberish? press this)
@@ -601,6 +1431,10 @@ cmd_help() {
     SENSEI_BURST_CONF=<file>   burst.conf location (default ~/.config/tmux/burst.conf)
     SENSEI_FINDALL_LINES=<n>   scrollback depth for F/findall (default 5000, 0 = unbounded)
     SENSEI_TMUX="tmux -L ..."  point the sensei script at a different socket
+    SENSEI_SPEC_CACHE=<dir>    where discovered tool grammars are cached (default
+                               ~/.cache/tmux-sensei/toolspecs)
+    SENSEI_PROBE_TIMEOUT=<n>   seconds before a hung --help probe is given up on (default 2)
+    SENSEI_NO_PROBE="a b"      never auto-probe these tools' --help/-h
 
   Full detail: README.md. Every raw binding in every table: `tmux list-keys`
   from a shell, not this popup.
@@ -667,6 +1501,12 @@ case "${1:-}" in
   strip) shift; cmd_strip "$@" ;;
   setup-shell) cmd_setup_shell ;;
   experiment) shift; cmd_experiment "$@" ;;
+  args) shift; cmd_args "$@" ;;
+  args-popup) shift; cmd_args_popup "$@" ;;
+  complete) shift; cmd_complete "$@" ;;
+  _lastline) shift; cmd_lastline "$@" ;;
+  discover) shift; cmd_discover "$@" ;;
+  tools) cmd_tools ;;
   help) cmd_help ;;
   *) sed -n '2,20p' "$0" ;;
 esac

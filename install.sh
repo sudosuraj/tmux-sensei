@@ -184,7 +184,10 @@ else
   echo "   2. start tmux:          tmux"
   echo "   3. prefix is C-s. Try:  C-s ?   (all keys)   C-s Space  (sensei layer)"
   echo "   4. first case:          sensei case acme.tld"
-  echo "   5. update later:        sensei update"
+  echo "   5. argument help:       sensei setup-shell   (wires Tab-completion — dynamic,"
+  echo "                           works on anything on PATH, no list to configure;"
+  echo "                           C-s H works now, no setup)"
+  echo "   6. update later:        sensei update"
 fi
 echo
 [ "${NEED_RELOAD:-0}" = "1" ] && warn "~/.local/bin was just added to PATH — run 'exec \$SHELL' before calling sensei"

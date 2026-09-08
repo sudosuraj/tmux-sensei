@@ -137,6 +137,15 @@ One key each, instead of piping a pane through `grep`:
 | `C-s B` | Numbered picker of your last 20 copies, with a preview of each |
 | `C-s F` | Type a pattern; greps every pane's scrollback in the session and lists which panes matched |
 
+### Argument help — context-aware, not history-based
+
+The thing shell history can't do: tell you what a tool's *next* flag, subcommand, or value actually is, the first time you use it. See [below](#context-aware-argument-help) for the full story.
+
+| Key | How to use it |
+|---|---|
+| `C-s H` | Popup: what comes next for the command in this pane — subcommand, flag, or the value a flag expects. Prefilled from whatever's typed (unsent) in the pane, editable before you look it up |
+| `Tab` (in your shell) | Real completion for covered tools, once `sensei setup-shell` has wired it in — same reference, no popup needed |
+
 ### Modes & recovery
 
 | Key | How to use it |
@@ -187,7 +196,10 @@ Every one of these is also safe to type by hand outside of a keybinding:
 | `sensei bufmenu` | Same as `C-s B`, callable directly |
 | `sensei strip <logfile>` | Strip ANSI codes from a log so it's clean for a report |
 | `sensei vpn` | Print the tun/wg status-bar readout by hand |
-| `sensei setup-shell` | Opt-in: wire up live ghost-text autosuggestions for bash (`ble.sh`) or zsh (`zsh-autosuggestions`) |
+| `sensei setup-shell` | Opt-in: wire up live ghost-text autosuggestions (bash `ble.sh` / zsh `zsh-autosuggestions`) **and** dynamic, tool-agnostic Tab-completion — works on anything on PATH, not a fixed list |
+| `sensei args <tool> [args so far...]` | Same as `C-s H`, callable directly — what comes next: subcommand, flag, or the value a flag expects |
+| `sensei tools` | List every tool sensei has probed and cached so far |
+| `sensei discover <tool> [sub]` | Force a fresh probe, ignoring the cache (a tool got upgraded, say) |
 | `sensei experiment <name>` | Scaffold a new drop-in idea in `~/.config/tmux/local.d/` and open it |
 | `sensei update` | Check for and install updates — stages to a temp file and asks before running, never a blind `curl` piped into `bash` |
 | `sensei help` | Print the same cheat sheet `C-s ?` shows |
@@ -219,6 +231,7 @@ I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and 
 | `local.conf` | `~/.config/tmux/local.conf` | **your** machine-local overrides (created empty, never overwritten) |
 | `burst.conf` | `~/.config/tmux/burst.conf` | **your** recon chains for `sensei burst` (created with no active profile, never overwritten) |
 | — | `~/.config/tmux/local.d/*.conf` | **your** one-file-per-idea experiments (not created by install — `sensei experiment <name>` scaffolds one) |
+| — | `~/.cache/tmux-sensei/toolspecs/` | discovered tool grammars — `sensei args`/`C-s H`/Tab-completion's cache, not a file you edit (see [below](#context-aware-argument-help)) |
 
 ---
 
@@ -255,6 +268,8 @@ E   g        edit-config popup / git popup                 X    open lab socket 
 B            numbered paste-buffer picker (last 20 copies)  F    search every pane's scrollback
 S            toggle synchronize-panes (loud when armed — see below)
 M            resync mouse tracking — scroll/click typing gibberish? press this
+H            argument help for the command in this pane — what comes next
+             (subcommand / flag / value), prefilled from what's typed
 ```
 
 ### `S` — synchronize-panes, on purpose
@@ -301,6 +316,9 @@ sensei strip <logfile>        ANSI-strip a log for a report
 sensei vpn                    the tun/wg indicator shown in the status bar (also fires an alert on drop)
 sensei bufmenu                numbered pick-list of the last 20 copied buffers, with a preview
 sensei findall <sess> <pat>   grep the last 5000 lines/pane (SENSEI_FINDALL_LINES=0 for everything)
+sensei args <tool> [...]      what comes next for this command — subcommand, flag, or a flag's value
+sensei tools                  list every tool sensei has probed and cached so far
+sensei discover <tool> [sub]  force a fresh probe, ignoring the cache
 ```
 
 ### `sensei burst` — the whole safety philosophy in one command
@@ -330,6 +348,18 @@ tmux can't give you Fish-style history autosuggestions — that's a shell featur
 - **zsh:** wires in `zsh-autosuggestions` the same way if it's installed, or tells you how to get it.
 
 Run it again any time you install one of these later — it's idempotent and only ever appends once.
+
+### Context-aware argument help
+
+Fully dynamic — no built-in tool list, nothing to configure. Ghost-text (above) only ever replays what you've typed before — no help the first time you run a tool, or for the one flag in fifty you never remember. sensei runs `<tool> --help` (falling back to `-h`), parses whatever comes back into flags/subcommands/values, and caches the result. It works on anything already on your `$PATH` — a tool you wrote yourself yesterday included — the moment you use it, not because someone taught sensei its name first.
+
+Three ways in, same engine:
+
+- **Tab, for real, in your shell.** `sensei setup-shell` wires this in as a *fallback*, not a per-tool registration, so there's no list of names to keep in sync — it only steps in for a command that doesn't already have completion of its own (a tool with real bash-completion installed, like `git` or `apt`, keeps using that). Under the hood bash and zsh need genuinely different mechanisms to pull this off cleanly — bash via `complete -D` (its own documented default-completer hook), zsh via prepending itself to the `completer` zstyle chain, which existing customization (oh-my-zsh, etc.) is preserved around, not overwritten — but the effect is the same either way. Press Tab after `nmap -sC -sV -` and you get nmap's actual remaining flags, not filenames in `$PWD`. After `nmap -T`, Tab offers `0 1 2 3 4 5`, because nmap's own help spelled out that it's a small closed set. After `ffuf -w`, Tab falls back to real filename completion, because a wordlist path can't be enumerated. The *first* Tab on a brand-new command probes and parses it — a small, bounded pause (`SENSEI_PROBE_TIMEOUT`, default 2s) — every Tab after that is instant, served from cache.
+- **`C-s H`**, any time, even mid-typing. Pops up prefilled with whatever's (unsent) on the command line in that pane — edit it if the guess is off, hit Enter to look it up, empty line to close.
+- **`sensei args <tool> [args so far...]`** by hand. `sensei args nmap` dumps the whole reference; `sensei args nmap -sC -sV -T` tells you `-T` expects `0-5`. `sensei tools` lists everything sensei has looked at so far; `sensei discover <tool> [sub]` forces a fresh probe (a tool got upgraded and you want its cache rebuilt sooner than the automatic mtime check would catch it).
+
+**Honest limits, because "fully dynamic" is a real trade-off, not a free lunch:** parse quality depends entirely on how the tool's own `--help` is formatted. Most modern Go/Python CLI tools (the ffuf/nuclei/gobuster/sqlmap/curl/openssl/docker end of the world), and even older ones with less regular formatting like nmap, parse into real flags, values, and often enumerated choices — nmap's own `-T<0-5>:` notation (the value glued straight onto the flag, no space) resolves to the same `0 1 2 3 4 5` a hand-curated reference would give you. What still degrades to flag-*names*-only (no clean description/value split) is text that genuinely has nothing else to go on in that shape — a description that argparse wrapped onto its own line with nothing left on the flag's line, or a tool like `git` whose top-level `--help` is prose with no flag list at all (sensei correctly finds nothing there, rather than guessing wrong). Worst case is no completion offered for a line; there is no tool this makes up a flag for. A probe only ever runs `<tool> --help` or `<tool> -h` (or, for a subcommand, `<tool> <sub> --help`/`-h`) — never through `sudo`, never with any other argument, stdin closed, output timeboxed — close to universal, side-effect-free conventions, but not a guarantee for every binary that might be on your PATH. Exclude a specific tool from ever being probed with `SENSEI_NO_PROBE="tool1 tool2"`.
 
 ---
 
