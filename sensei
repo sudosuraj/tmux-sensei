@@ -132,6 +132,18 @@ _run_probe() {
     sleep 0.2
     ticks=$((ticks + 1))
   done
+  # SIGTERM is a request, not a guarantee -- a tool that traps or ignores it
+  # (or is itself stuck uninterruptibly) would otherwise hang this probe
+  # indefinitely despite the "timeout" above. Give it a short grace period
+  # to exit cleanly, then SIGKILL, which a process cannot trap or ignore.
+  if kill -0 "$pid" 2>/dev/null; then
+    local grace=0
+    while [ "$grace" -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.2
+      grace=$((grace + 1))
+    done
+    kill -KILL "$pid" 2>/dev/null
+  fi
   wait "$pid" 2>/dev/null
   cat "$out"; rm -f "$out"
 }
@@ -190,6 +202,20 @@ function extract_enum(desc,    e) {
     gsub(/[ \t]/, "", e)
   }
   return e
+}
+# a bare numeric range as the whole value token (nmap's own "-T<0-5>:" is
+# the case this exists for) is as much an enumerable closed set as a
+# {choices} list -- just spelled as bounds instead of a literal list.
+# Capped so a value that only LOOKS like a range (e.g. a port range someone
+# wrote as 1-65535) doesn't get expanded into 65000 fake candidates.
+function expand_numeric_range(tok,    b, lo, hi, i, r) {
+  if (tok !~ /^[0-9][0-9]?[0-9]?-[0-9][0-9]?[0-9]?$/) return ""
+  split(tok, b, "-")
+  lo = b[1] + 0; hi = b[2] + 0
+  if (lo >= hi || (hi - lo) > 20) return ""
+  r = lo
+  for (i = lo + 1; i <= hi; i++) r = r "," i
+  return r
 }
 # a value hint that's itself a bare "A|B|C" alternation (e.g. openssl's own
 # "-inform PEM|DER") is a real enum handed to us for free -- promote it. The
@@ -253,7 +279,7 @@ function emit(flags, value, desc, enumv,    folded) {
 
   if (n >= 2 && ok && flags != "") { emit(flags, value, desc, extract_enum(desc)); next }
 
-  if (match(trimmed, /^-[A-Za-z0-9]([A-Za-z0-9\/]*[A-Za-z0-9])?/)) {
+  if (match(trimmed, /^--?[A-Za-z0-9]([A-Za-z0-9\/-]*[A-Za-z0-9])?/)) {
     cluster = substr(trimmed, RSTART, RLENGTH)
     rest = substr(trimmed, RSTART + RLENGTH)
     flags = ""
@@ -262,26 +288,61 @@ function emit(flags, value, desc, enumv,    folded) {
       p = parts[i]
       if (p == "") continue
       if (substr(p, 1, 1) != "-") p = "-" p
-      if (p ~ /^--?[A-Za-z0-9][A-Za-z0-9]*$/) flags = (flags == "" ? p : flags "," p)
+      if (p ~ /^--?[A-Za-z0-9][A-Za-z0-9-]*$/) flags = (flags == "" ? p : flags "," p)
     }
-    more = 1
-    while (more) {
-      more = 0
-      if (match(rest, /^,[ \t]*--?[A-Za-z0-9][A-Za-z0-9-]*/)) {
-        extra = substr(rest, RSTART, RLENGTH); gsub(/^,[ \t]*/, "", extra)
-        flags = flags "," extra
-        rest = substr(rest, RSTART + RLENGTH)
-        more = 1
-      } else if (match(rest, /^\/-?[A-Za-z0-9][A-Za-z0-9]*/)) {
-        extra = substr(rest, RSTART, RLENGTH); sub(/^\//, "", extra)
-        if (substr(extra, 1, 1) != "-") extra = "-" extra
-        flags = flags "," extra
-        rest = substr(rest, RSTART + RLENGTH)
-        more = 1
+
+    value = "-"; enumv = ""
+    # a value glued directly onto the flag with no space at all -- nmap's
+    # own "-T<0-5>:" is exactly this. If it's there, it's the whole answer;
+    # a real second alias is comma/slash-joined text, never bracketed, so
+    # there's nothing to gain by also trying the continuation loop below.
+    if (match(rest, /^[<{\[][^ \t]+[>}\]]/)) {
+      vtok = substr(rest, RSTART, RLENGTH)
+      rest = substr(rest, RSTART + RLENGTH)
+      inner = substr(vtok, 2, length(vtok) - 2)
+      value = "<" inner ">"
+      enumv = extract_enum(vtok)
+      if (enumv == "") enumv = expand_numeric_range(inner)
+    } else {
+      more = 1
+      while (more) {
+        more = 0
+        if (match(rest, /^,[ \t]*--?[A-Za-z0-9][A-Za-z0-9-]*/)) {
+          extra = substr(rest, RSTART, RLENGTH); gsub(/^,[ \t]*/, "", extra)
+          flags = flags "," extra
+          rest = substr(rest, RSTART + RLENGTH)
+          more = 1
+        } else if (match(rest, /^\/-?[A-Za-z0-9][A-Za-z0-9]*/)) {
+          extra = substr(rest, RSTART, RLENGTH); sub(/^\//, "", extra)
+          if (substr(extra, 1, 1) != "-") extra = "-" extra
+          flags = flags "," extra
+          rest = substr(rest, RSTART + RLENGTH)
+          more = 1
+        } else if (match(rest, /^[ \t]+[A-Za-z_][A-Za-z0-9_]*,[ \t]*--?[A-Za-z0-9][A-Za-z0-9-]*/)) {
+          # argparse's own convention: "-o OUTPUT, --output OUTPUT" -- a
+          # bare word directly after the flag, THEN a comma-joined alias,
+          # is a repeated metavar (the value), not a second flag.
+          full = substr(rest, RSTART, RLENGTH)
+          if (value == "-" && match(full, /[A-Za-z_][A-Za-z0-9_]*/)) {
+            value = "<" substr(full, RSTART, RLENGTH) ">"
+          }
+          if (match(full, /--?[A-Za-z0-9][A-Za-z0-9-]*$/)) {
+            flags = flags "," substr(full, RSTART, RLENGTH)
+          }
+          rest = substr(rest, RSTART + RLENGTH)
+          more = 1
+        }
       }
     }
     gsub(/^[ \t:.,\[\]]+/, "", rest)
-    if (flags != "") emit(flags, "-", rest, "")
+    gsub(/[ \t]+$/, "", rest)
+    # argparse repeats the metavar after every alias ("-o OUTPUT, --output
+    # OUTPUT") -- once that's captured as the value, a leftover trailing
+    # copy of the exact same word is not a description, just noise.
+    valinner = value; gsub(/^<|>$/, "", valinner)
+    if (rest == valinner) rest = ""
+    if (enumv == "") enumv = extract_enum(rest)
+    if (flags != "") emit(flags, value, rest, enumv)
   }
 }
 AWKEOF
@@ -314,11 +375,23 @@ BEGIN { insection = 0 }
       next
     }
   }
+  # a {a,b,c} brace set is only a SUBCOMMAND selector on argparse's own
+  # positional-argument/usage syntax -- the exact same brace syntax also
+  # shows up as an ORDINARY FLAG's value choices, e.g. a usage synopsis
+  # "[--level {debug,info,warn,error}]" or the flag's own definition line
+  # "--level {debug,info,warn,error}" -- and that is not a subcommand list.
+  # Distinguish them by what's immediately before the brace on this line:
+  # a flag-associated one is directly preceded by "-x"/"--flag" (with only
+  # optional "[ " between); a genuine subcommand selector isn't (netexec's
+  # own "prog [-h] {smb,winrm,...}" has a *closing* "]" in the way instead).
   if (match(line, /\{[A-Za-z0-9_,-]+,[A-Za-z0-9_,-]+\}/)) {
-    inner = substr(line, RSTART + 1, RLENGTH - 2)
-    ncand = split(inner, cs, ",")
-    for (i = 1; i <= ncand; i++) if (cs[i] != "") print cs[i] "\t"
-    next
+    pre = substr(line, 1, RSTART - 1)
+    if (pre !~ /--?[A-Za-z][A-Za-z0-9_-]*[ \t]*\[?[ \t]*$/) {
+      inner = substr(line, RSTART + 1, RLENGTH - 2)
+      ncand = split(inner, cs, ",")
+      for (i = 1; i <= ncand; i++) if (cs[i] != "") print cs[i] "\t"
+      next
+    }
   }
 
   # signal C: a dense multi-column NAME GRID with no per-item description --
@@ -371,6 +444,12 @@ _ensure_top_cache() {  # $1=tool -> prints the cache FILE PATH
     printf '%s' "$f"; return 0
   fi
   mkdir -p "$SPEC_CACHE"
+  # a unique temp name (not a fixed "$f.tmp") -- two sensei invocations
+  # racing to discover the same not-yet-cached tool at once (two panes, or
+  # a shell and the C-s H popup) would otherwise open and write the same
+  # path independently, and whichever `mv` lands last could publish a
+  # torn/interleaved file for the other to read mid-write.
+  local tmp; tmp="$(mktemp "${f}.XXXXXX")" || return 1
   {
     printf '# mtime:%s\n' "$mt"
     if _no_probe "$tool"; then
@@ -387,7 +466,7 @@ _ensure_top_cache() {  # $1=tool -> prints the cache FILE PATH
         printf 'T|%s|%s\n' "$tool" "$tool"
       fi
     fi
-  } > "$f.tmp" && mv "$f.tmp" "$f"
+  } > "$tmp" && mv "$tmp" "$f"
   printf '%s' "$f"
 }
 
@@ -402,13 +481,14 @@ _ensure_sub_cache() {  # $1=tool $2=sub -> prints the cache FILE PATH
     printf '%s' "$f"; return 0
   fi
   mkdir -p "$SPEC_CACHE"
+  local tmp; tmp="$(mktemp "${f}.XXXXXX")" || return 1
   {
     printf '# mtime:%s\n' "$mt"
     if ! _no_probe "$tool"; then
       local help; help="$(_probe_help "$tool" "$sub")"
       [ -n "$help" ] && printf '%s\n' "$help" | _parse_flags "$tool" "$sub"
     fi
-  } > "$f.tmp" && mv "$f.tmp" "$f"
+  } > "$tmp" && mv "$tmp" "$f"
   printf '%s' "$f"
 }
 
@@ -504,14 +584,25 @@ cmd_args() {
   [ "$n" -gt 0 ] || die "nothing to look up"
 
   local off; off=$(_spec_skip_wrappers "$n" "${words[@]}")
-  local tool="${words[$off]}"
+  local tool="${words[$off]:-}"
+  [ -n "$tool" ] || die "nothing to look up (just a wrapper prefix, no tool named)"
 
   _spec_have_tool "$tool" || die "not found on PATH: $tool"
 
   if [ -z "$(_spec_flags_expanded "$tool" "")" ] && [ -z "$(_spec_subs "$tool")" ]; then
-    printf '  %s is on PATH, but --help/-h came back empty, or in a shape this\n' "$tool"
-    printf '  parser couldn'"'"'t make sense of. Its raw output, if any:\n\n'
-    _probe_help "$tool"
+    local summary; summary="$(_spec_tool_summary "$tool")"
+    if [ "$summary" = "$tool" ]; then
+      # _ensure_top_cache's own sentinel for "genuinely no output at all" --
+      # already established during discovery, so there's nothing new a
+      # second probe would find. Don't pay for one (a tool that hangs or
+      # traps signals already cost the discovery probe its full bounded
+      # timeout once; re-probing here would be that cost again for nothing).
+      printf '  %s is on PATH, but --help/-h produced no output at all.\n' "$tool"
+    else
+      printf '  %s is on PATH, but --help/-h came back in a shape this parser\n' "$tool"
+      printf '  could not make sense of. Its raw output:\n\n'
+      _probe_help "$tool"
+    fi
     return 0
   fi
 
@@ -1154,7 +1245,14 @@ _write_block() {  # $1=file $2=marker $3=content
   local f="$1" marker="$2" content="$3"
   local begin="# >>> tmux-sensei:$marker >>>" end="# <<< tmux-sensei:$marker <<<"
   if grep -qsF "$begin" "$f"; then
+    # mktemp defaults to mode 600 -- an rc file is typically 644, and mv'ing
+    # a fresh mktemp file over it would silently strip group/other read
+    # access on every re-run of `sensei setup-shell`. Match the original
+    # file's mode (falling back to a sane 644 if that lookup ever fails)
+    # before the replace, not after -- mv is atomic, chmod-after-mv is not.
+    local mode; mode="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f" 2>/dev/null)"
     local tmp; tmp="$(mktemp "${f}.XXXXXX")"
+    chmod "${mode:-644}" "$tmp" 2>/dev/null
     awk -v b="$begin" -v e="$end" '$0==b{skip=1} !skip{print} $0==e{skip=0}' "$f" > "$tmp" && mv "$tmp" "$f"
   fi
   printf '\n%s\n%s\n%s\n' "$begin" "$content" "$end" >> "$f"
@@ -1192,7 +1290,7 @@ _sensei_complete() {
   fi
   COMPREPLY=($(printf '%s\n' "$out" | cut -f1))
 }
-complete -D -F _sensei_complete
+complete -D -F _sensei_complete -o bashdefault -o default
 EOF
 )
   _write_block "$br" "complete" "$body"
@@ -1206,19 +1304,32 @@ _setup_shell_complete_zsh() {
   body=$(cat <<'EOF'
 # dynamic, tool-agnostic Tab-completion -- asks each command about itself
 # rather than looking it up in a list (see the ARGUMENT HELP comment near
-# the top of the sensei script). Registered as `-default-`: zsh's
-# completion-dispatch FALLBACK, tried only for a command with no completion
-# of its own already, so this applies to anything on your PATH, not a fixed
-# set. Needs compinit already loaded (true for most zsh setups, oh-my-zsh
-# included); if Tab does nothing, add `autoload -Uz compinit && compinit`
-# above this. First Tab on a brand-new command probes and caches it (a
-# small one-time pause); every Tab after that is instant.
-_sensei_complete_zsh() {
+# the top of the sensei script). NOT registered via `compdef ... -default-`
+# -- that's the textbook-documented fallback mechanism, but empirically it
+# is never actually reached for a real Tab press in a stock compinit setup
+# (verified with a scripted pty: a -default- completer that calls compadd
+# with a distinctive candidate is simply never invoked; zsh's own _complete
+# resolves an unregistered command straight to file completion first).
+# What DOES work: registering as the FIRST entry in the `completer` zstyle
+# chain, so it's tried before zsh's own dispatch -- it inspects the command
+# itself (via `sensei complete`) and, if it has nothing to offer (command
+# not on PATH, no probeable flags, wrong argument position), returns
+# immediately so the rest of the chain (a tool's own real completion, then
+# ordinary file completion) still runs exactly as before. Any completer
+# list you've already customized (oh-my-zsh, etc.) is preserved, not
+# overwritten -- this only prepends itself, once. Needs compinit already
+# loaded (true for most zsh setups); if Tab does nothing at all, add
+# `autoload -Uz compinit && compinit` above this. First Tab on a brand-new
+# command probes and caches it (a small one-time pause); every Tab after
+# that is instant.
+_sensei_completer() {
+  (( CURRENT > 1 )) || return 1
   local cword=$((CURRENT - 1))
   local out; out=$(sensei complete "$cword" "${words[@]}" 2>/dev/null)
+  [[ -n "$out" ]] || return 1
   if [[ "$out" == "@@FILE@@" ]]; then
     _files
-    return
+    return 0
   fi
   local -a cands=()
   local line
@@ -1226,9 +1337,15 @@ _sensei_complete_zsh() {
     [ -n "$line" ] || continue
     cands+=("${line%%$'\t'*}:${line#*$'\t'}")
   done <<< "$out"
-  _describe 'sensei' cands
+  _describe sensei cands
 }
-compdef _sensei_complete_zsh -default-
+local -a _sensei_existing_completers
+zstyle -a ':completion:*' completer _sensei_existing_completers 2>/dev/null
+if (( ${_sensei_existing_completers[(I)_sensei_completer]} == 0 )); then
+  [[ ${#_sensei_existing_completers[@]} -eq 0 ]] && _sensei_existing_completers=(_complete _ignored)
+  zstyle ':completion:*' completer _sensei_completer "${_sensei_existing_completers[@]}"
+fi
+unset _sensei_existing_completers
 EOF
 )
   _write_block "$zr" "complete" "$body"
