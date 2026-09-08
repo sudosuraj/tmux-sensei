@@ -151,6 +151,47 @@ BURSTEOF
   ok "created burst.conf (no active profile — see the file for the format)"
 }
 
+# sensei-args.conf: your own additions to the built-in tool reference behind
+# `sensei args`, C-s H, and Tab-completion. Created once, never touched by
+# updates. Rows here are ADDITIVE to the built-ins — same tool name adds more
+# flags to it, a new tool name teaches sensei that tool from scratch.
+[ -f "$CFG_DIR/sensei-args.conf" ] || {
+  cat > "$CFG_DIR/sensei-args.conf" <<'SPECSEOF'
+# tmux-sensei argument reference — your own additions, created once, never
+# touched by updates. Feeds `sensei args`, the C-s H popup, and Tab-completion
+# (after `sensei setup-shell` wires it up) with the SAME engine as the
+# built-in tools — this file just adds more rows to that same reference.
+#
+# Three record kinds, pipe-delimited, one per line (blank lines/comments
+# ignored):
+#   T|tool|one-line summary
+#   S|tool|subcommand|one-line summary            (only if the tool has subcommands)
+#   F|tool|subcommand|flags|value|desc|enum
+#
+# flags   comma-joined aliases, e.g. -p,--ports (no spaces)
+# value   "-" for a boolean flag, else a placeholder like <file> or <ports> —
+#         a placeholder containing "file/path/wordlist/basename/output/log/dir"
+#         gets real filename Tab-completion for that value automatically
+# enum    comma list of the flag's actual legal values, only when it's a small
+#         closed set (severities, modes, ...) — empty for free-form values
+# subcommand is blank for a flag valid everywhere on the tool (or the tool has
+# none); named otherwise, and merges with the blank-subcommand flags once that
+# subcommand is chosen on the line.
+#
+# Never put a literal | or a TAB inside a field. To ADD flags to a built-in
+# tool (nmap, ffuf, gobuster, hydra, sqlmap, nuclei, netexec, hashcat, john,
+# curl, openssl, enum4linux-ng, wpscan, msfvenom — see the sensei script's own
+# ARGUMENT HELP comment for the full built-in reference), just reuse its name.
+#
+# Example — teach sensei an internal tool of your own:
+#
+# T|impacket-secretsdump|Dump SAM/LSA/NTDS secrets over SMB
+# F|impacket-secretsdump||-just-dc|-|Only dump NTDS.dit (skip SAM/LSA/cached creds)|
+# F|impacket-secretsdump||-outputfile|<basename>|Write results to basename.*|
+SPECSEOF
+  ok "created sensei-args.conf (teach sensei your own tools — see the file)"
+}
+
 # ── 5. shell wiring (idempotent — added once, ever) ───────────────────────────
 detect_rc() {
   case "${SHELL##*/}" in
@@ -184,8 +225,10 @@ else
   echo "   2. start tmux:          tmux"
   echo "   3. prefix is C-s. Try:  C-s ?   (all keys)   C-s Space  (sensei layer)"
   echo "   4. first case:          sensei case acme.tld"
-  echo "   5. update later:        sensei update"
+  echo "   5. argument help:       sensei setup-shell   (wires Tab-completion for"
+  echo "                           nmap/ffuf/gobuster/hydra/... — C-s H works now, no setup)"
+  echo "   6. update later:        sensei update"
 fi
 echo
 [ "${NEED_RELOAD:-0}" = "1" ] && warn "~/.local/bin was just added to PATH — run 'exec \$SHELL' before calling sensei"
-c '90' "config: $CFG_DIR/tmux.conf   ·   overrides: $CFG_DIR/local.conf   ·   update: sensei update"
+c '90' "config: $CFG_DIR/tmux.conf   ·   overrides: $CFG_DIR/local.conf   ·   argument help: $CFG_DIR/sensei-args.conf   ·   update: sensei update"

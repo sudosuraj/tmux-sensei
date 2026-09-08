@@ -137,6 +137,15 @@ One key each, instead of piping a pane through `grep`:
 | `C-s B` | Numbered picker of your last 20 copies, with a preview of each |
 | `C-s F` | Type a pattern; greps every pane's scrollback in the session and lists which panes matched |
 
+### Argument help — context-aware, not history-based
+
+The thing shell history can't do: tell you what a tool's *next* flag, subcommand, or value actually is, the first time you use it. See [below](#context-aware-argument-help) for the full story.
+
+| Key | How to use it |
+|---|---|
+| `C-s H` | Popup: what comes next for the command in this pane — subcommand, flag, or the value a flag expects. Prefilled from whatever's typed (unsent) in the pane, editable before you look it up |
+| `Tab` (in your shell) | Real completion for covered tools, once `sensei setup-shell` has wired it in — same reference, no popup needed |
+
 ### Modes & recovery
 
 | Key | How to use it |
@@ -187,7 +196,8 @@ Every one of these is also safe to type by hand outside of a keybinding:
 | `sensei bufmenu` | Same as `C-s B`, callable directly |
 | `sensei strip <logfile>` | Strip ANSI codes from a log so it's clean for a report |
 | `sensei vpn` | Print the tun/wg status-bar readout by hand |
-| `sensei setup-shell` | Opt-in: wire up live ghost-text autosuggestions for bash (`ble.sh`) or zsh (`zsh-autosuggestions`) |
+| `sensei setup-shell` | Opt-in: wire up live ghost-text autosuggestions (bash `ble.sh` / zsh `zsh-autosuggestions`) **and** real Tab-completion for every tool `sensei args` covers |
+| `sensei args <tool> [args so far...]` | Same as `C-s H`, callable directly — what comes next: subcommand, flag, or the value a flag expects |
 | `sensei experiment <name>` | Scaffold a new drop-in idea in `~/.config/tmux/local.d/` and open it |
 | `sensei update` | Check for and install updates — stages to a temp file and asks before running, never a blind `curl` piped into `bash` |
 | `sensei help` | Print the same cheat sheet `C-s ?` shows |
@@ -218,6 +228,7 @@ I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and 
 | `install.sh` / `uninstall.sh` | — | setup / teardown |
 | `local.conf` | `~/.config/tmux/local.conf` | **your** machine-local overrides (created empty, never overwritten) |
 | `burst.conf` | `~/.config/tmux/burst.conf` | **your** recon chains for `sensei burst` (created with no active profile, never overwritten) |
+| `sensei-args.conf` | `~/.config/tmux/sensei-args.conf` | **your** additions to the `sensei args`/`C-s H`/Tab-completion reference (created empty, never overwritten) |
 | — | `~/.config/tmux/local.d/*.conf` | **your** one-file-per-idea experiments (not created by install — `sensei experiment <name>` scaffolds one) |
 
 ---
@@ -255,6 +266,8 @@ E   g        edit-config popup / git popup                 X    open lab socket 
 B            numbered paste-buffer picker (last 20 copies)  F    search every pane's scrollback
 S            toggle synchronize-panes (loud when armed — see below)
 M            resync mouse tracking — scroll/click typing gibberish? press this
+H            argument help for the command in this pane — what comes next
+             (subcommand / flag / value), prefilled from what's typed
 ```
 
 ### `S` — synchronize-panes, on purpose
@@ -301,6 +314,7 @@ sensei strip <logfile>        ANSI-strip a log for a report
 sensei vpn                    the tun/wg indicator shown in the status bar (also fires an alert on drop)
 sensei bufmenu                numbered pick-list of the last 20 copied buffers, with a preview
 sensei findall <sess> <pat>   grep the last 5000 lines/pane (SENSEI_FINDALL_LINES=0 for everything)
+sensei args <tool> [...]      what comes next for this command — subcommand, flag, or a flag's value
 ```
 
 ### `sensei burst` — the whole safety philosophy in one command
@@ -330,6 +344,28 @@ tmux can't give you Fish-style history autosuggestions — that's a shell featur
 - **zsh:** wires in `zsh-autosuggestions` the same way if it's installed, or tells you how to get it.
 
 Run it again any time you install one of these later — it's idempotent and only ever appends once.
+
+### Context-aware argument help
+
+Ghost-text (above) only ever replays what you've typed before — no help the first time you run a tool, or for the one flag in fifty you never remember. This is the other half: a curated **grammar** for common offensive-security tools — tool → subcommand → flag → the value it expects — checked live against whatever you've already typed, so it can answer "what comes next *here*," not "what have I typed before." History stays around (that's what ghost-text is for); it was never the part doing the actual understanding.
+
+Three ways in, same engine:
+
+- **Tab, for real, in your shell.** `sensei setup-shell` also wires up bash/zsh programmable completion for every covered tool — press Tab after `nmap -sC -sV -` and you get the tool's actual remaining flags, not filenames in `$PWD`. After `nmap -T`, Tab offers `0 1 2 3 4 5`, because that flag's value is a small closed set, not free text. After `ffuf -w`, Tab falls back to real filename completion, because a wordlist path can't be enumerated.
+- **`C-s H`**, any time, even mid-typing. Pops up prefilled with whatever's (unsent) on the command line in that pane — edit it if the guess is off, hit Enter to look it up, empty line to close.
+- **`sensei args <tool> [args so far...]`** by hand. `sensei args nmap` dumps the whole reference; `sensei args nmap -sC -sV -T` tells you `-T` expects `0-5`.
+
+Covered out of the box: `nmap`, `ffuf`, `gobuster`, `hydra`, `sqlmap`, `nuclei`, `netexec`, `hashcat`, `john`, `curl`, `openssl`, `enum4linux-ng`, `wpscan`, `msfvenom` — curated, not exhaustive, same spirit as `C-s ?`'s cheat sheet. A tool it doesn't know falls back to that tool's own `--help`/`-h`/`man`, so `sensei args` and `C-s H` are never a dead end, just not the curated version.
+
+Teach it your own tools, or extend a built-in one, without touching the script: add lines to `~/.config/tmux/sensei-args.conf` (created empty on install, never touched by updates — same deal as `burst.conf`). Format:
+
+```
+T|tool|one-line summary
+S|tool|subcommand|one-line summary          (only if the tool has subcommands)
+F|tool|subcommand|flags|value|desc|enum
+```
+
+`flags` is comma-joined aliases (`-p,--ports`, no spaces). `value` is `-` for a boolean flag, else a placeholder like `<file>` or `<ports>` — a placeholder containing "file/path/wordlist/basename/output/log/dir" gets real filename Tab-completion automatically. `enum` is a comma list of a flag's actual legal values, only when it's a small closed set (severities, attack modes, ...); leave it empty for free-form values. `subcommand` blank means "valid everywhere on this tool"; a named one merges with the blank-subcommand flags once that subcommand appears on the line. Rows here are additive — reuse a built-in tool's name to bolt more flags onto it, or a new name to teach sensei a tool from scratch (an internal C2, a client's custom script, whatever `nmap`-style grammar you actually run). The installed file ships with a worked example.
 
 ---
 
