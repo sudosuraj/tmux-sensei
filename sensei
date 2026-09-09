@@ -443,40 +443,58 @@ _cache_key() {
   printf '%s_%s' "$base" "$h"
 }
 
+# shared cache-write shell: check the mtime-stamp header, and if stale/
+# missing, write via a unique temp name (not a fixed "$f.tmp") -- two sensei
+# invocations racing to discover the same not-yet-cached tool at once (two
+# panes, or a shell and the C-s H popup) would otherwise open and write the
+# same path independently, and whichever `mv` lands last could publish a
+# torn/interleaved file for the other to read mid-write -- then atomically
+# publish it. $3 (a function name) is called with the remaining args to
+# produce the body; only WHAT gets probed/parsed differs between callers.
+_ensure_cache_generic() {  # $1=file $2=mtime $3=writer-fn [writer-args...]
+  local f="$1" mt="$2" writer="$3"; shift 3
+  if [ -f "$f" ] && [ "$(head -1 "$f" 2>/dev/null)" = "# mtime:$mt" ]; then
+    printf '%s' "$f"; return 0
+  fi
+  mkdir -p "$SPEC_CACHE"
+  local tmp; tmp="$(mktemp "${f}.XXXXXX")" || return 1
+  { printf '# mtime:%s\n' "$mt"; "$writer" "$@"; } > "$tmp" && mv "$tmp" "$f"
+  printf '%s' "$f"
+}
+
+_write_top_cache_body() {  # $1=tool
+  local tool="$1"
+  if _no_probe "$tool"; then
+    printf 'T|%s|(SENSEI_NO_PROBE excludes this tool from auto-discovery)\n' "$tool"
+  else
+    local help; help="$(_probe_help "$tool")"
+    if [ -n "$help" ]; then
+      local summary; summary="$(printf '%s\n' "$help" | awk 'NF{print; exit}' | cut -c1-100 | tr '|' '/')"
+      printf 'T|%s|%s\n' "$tool" "${summary:-$tool}"
+      printf '%s\n' "$help" | _parse_flags "$tool" ""
+      printf '%s\n' "$help" | _parse_subs | awk -F'\t' -v t="$tool" '
+        { n=$1; d=$2; gsub(/\|/,"/",n); gsub(/\|/,"/",d); gsub(/\t/," ",d); print "S|" t "|" n "|" d }'
+    else
+      printf 'T|%s|%s\n' "$tool" "$tool"
+    fi
+  fi
+}
+
+_write_sub_cache_body() {  # $1=tool $2=sub
+  local tool="$1" sub="$2"
+  if ! _no_probe "$tool"; then
+    local help; help="$(_probe_help "$tool" "$sub")"
+    [ -n "$help" ] && printf '%s\n' "$help" | _parse_flags "$tool" "$sub"
+  fi
+}
+
 _ensure_top_cache() {  # $1=tool -> prints the cache FILE PATH
   local tool="$1"
   local bin; bin="$(command -v "$tool" 2>/dev/null)" || return 1
   local key; key="$(_cache_key "$bin")"
   local f="$SPEC_CACHE/${key}.top"
   local mt; mt="$(_mtime "$bin")"
-  if [ -f "$f" ] && [ "$(head -1 "$f" 2>/dev/null)" = "# mtime:$mt" ]; then
-    printf '%s' "$f"; return 0
-  fi
-  mkdir -p "$SPEC_CACHE"
-  # a unique temp name (not a fixed "$f.tmp") -- two sensei invocations
-  # racing to discover the same not-yet-cached tool at once (two panes, or
-  # a shell and the C-s H popup) would otherwise open and write the same
-  # path independently, and whichever `mv` lands last could publish a
-  # torn/interleaved file for the other to read mid-write.
-  local tmp; tmp="$(mktemp "${f}.XXXXXX")" || return 1
-  {
-    printf '# mtime:%s\n' "$mt"
-    if _no_probe "$tool"; then
-      printf 'T|%s|(SENSEI_NO_PROBE excludes this tool from auto-discovery)\n' "$tool"
-    else
-      local help; help="$(_probe_help "$tool")"
-      if [ -n "$help" ]; then
-        local summary; summary="$(printf '%s\n' "$help" | awk 'NF{print; exit}' | cut -c1-100 | tr '|' '/')"
-        printf 'T|%s|%s\n' "$tool" "${summary:-$tool}"
-        printf '%s\n' "$help" | _parse_flags "$tool" ""
-        printf '%s\n' "$help" | _parse_subs | awk -F'\t' -v t="$tool" '
-          { n=$1; d=$2; gsub(/\|/,"/",n); gsub(/\|/,"/",d); gsub(/\t/," ",d); print "S|" t "|" n "|" d }'
-      else
-        printf 'T|%s|%s\n' "$tool" "$tool"
-      fi
-    fi
-  } > "$tmp" && mv "$tmp" "$f"
-  printf '%s' "$f"
+  _ensure_cache_generic "$f" "$mt" _write_top_cache_body "$tool"
 }
 
 _ensure_sub_cache() {  # $1=tool $2=sub -> prints the cache FILE PATH
@@ -486,32 +504,38 @@ _ensure_sub_cache() {  # $1=tool $2=sub -> prints the cache FILE PATH
   local safesub; safesub="$(printf '%s' "$sub" | tr -c 'A-Za-z0-9_-' '_')"
   local f="$SPEC_CACHE/${key}__${safesub}.sub"
   local mt; mt="$(_mtime "$bin")"
-  if [ -f "$f" ] && [ "$(head -1 "$f" 2>/dev/null)" = "# mtime:$mt" ]; then
-    printf '%s' "$f"; return 0
-  fi
-  mkdir -p "$SPEC_CACHE"
-  local tmp; tmp="$(mktemp "${f}.XXXXXX")" || return 1
-  {
-    printf '# mtime:%s\n' "$mt"
-    if ! _no_probe "$tool"; then
-      local help; help="$(_probe_help "$tool" "$sub")"
-      [ -n "$help" ] && printf '%s\n' "$help" | _parse_flags "$tool" "$sub"
-    fi
-  } > "$tmp" && mv "$tmp" "$f"
-  printf '%s' "$f"
+  _ensure_cache_generic "$f" "$mt" _write_sub_cache_body "$tool" "$sub"
 }
 
 # the merged view for tool[/sub]: top-level (summary + global flags +
 # known subcommand names) always; that ONE subcommand's own flags too, but
 # only when asked for -- this is what keeps discovery lazy.
+#
+# Memoized for the life of this one sensei process: a single `cmd_args`/
+# `cmd_complete` call queries this same (tool, sub) pair repeatedly (once
+# per already-typed word to find the chosen subcommand, again for its flag
+# value, again to list flags/subcommands) -- without this, each of those
+# re-resolves the binary path, re-stats its mtime, and re-`cat`s the same
+# on-disk cache file from scratch. One process only ever needs one blob.
+_SPEC_BLOB_KEY=""
+_SPEC_BLOB_VAL=""
 _spec_blob_for() {  # $1=tool $2=sub(may be empty)
-  local tool="$1" sub="$2" f
-  f="$(_ensure_top_cache "$tool")" || return 1
-  [ -n "$f" ] && cat "$f"
+  local tool="$1" sub="$2" key="$1|$2"
+  if [ "$key" = "$_SPEC_BLOB_KEY" ]; then
+    printf '%s' "$_SPEC_BLOB_VAL"
+    return 0
+  fi
+  local f; f="$(_ensure_top_cache "$tool")" || return 1
+  local blob=""
+  [ -n "$f" ] && blob="$(cat "$f")"
   if [ -n "$sub" ]; then
     local sf; sf="$(_ensure_sub_cache "$tool" "$sub")"
-    [ -n "$sf" ] && cat "$sf"
+    [ -n "$sf" ] && blob="${blob}
+$(cat "$sf")"
   fi
+  _SPEC_BLOB_KEY="$key"
+  _SPEC_BLOB_VAL="$blob"
+  printf '%s' "$blob"
 }
 
 _spec_have_tool() { command -v "$1" >/dev/null 2>&1; }
@@ -661,6 +685,29 @@ _keyword_extra() {  # $1=query $2=desc-field $3=exclude-names(newline list) $4=m
   '
 }
 
+# the "exact prefix, plus anything conceptually related, folding the
+# related set into primary if prefix matching found nothing" sequence --
+# shared by the subs/flags sections of `cmd_args` and by `cmd_complete`, so
+# the ranking/fallback policy lives in exactly one place instead of being
+# hand-copied at each call site (and risking the three silently drifting
+# apart). Sets globals rather than echoing, since callers need BOTH pieces.
+MWR_PRIMARY=""
+MWR_EXTRA=""
+_match_with_related() {  # $1=allrows $2=filter $3=desc-field(for _keyword_extra)
+  local allrows="$1" filter="$2" df="$3"
+  MWR_PRIMARY="$(printf '%s\n' "$allrows" | _prefix_match "$filter")"
+  MWR_EXTRA=""
+  if [ -n "$filter" ]; then
+    local shown ms
+    shown="$(printf '%s\n' "$MWR_PRIMARY" | cut -f1)"
+    ms=3; [ -z "$MWR_PRIMARY" ] && ms=1
+    MWR_EXTRA="$(printf '%s\n' "$allrows" | _keyword_extra "$filter" "$df" "$shown" "$ms")"
+  fi
+  if [ -z "$MWR_PRIMARY" ] && [ -n "$MWR_EXTRA" ]; then
+    MWR_PRIMARY="$MWR_EXTRA"; MWR_EXTRA=""
+  fi
+}
+
 # ── sensei args — human-facing: what comes next, right now ────────────────────
 # `sensei args nmap -sC -sV -` and `sensei args nmap` both work; so does a
 # single quoted string (that's what the C-s H popup passes). First call for a
@@ -704,6 +751,11 @@ cmd_args() {
     printf '  already typed: %s\n' "${words[*]:$((off+1))}"
   fi
 
+  # _spec_flags_expanded rows are alias|value|desc|enum -- computed once
+  # here and reused below both for glued-value detection and the flags
+  # listing, instead of re-querying the same (tool, sub) pair twice.
+  local allflags; allflags=$(_spec_flags_expanded "$tool" "$sub")
+
   # last word is a KNOWN flag that takes a value -> that's the whole answer;
   # anything else on the line right now is a distraction, don't list it too
   local last="" vinfo="" filter="" awaiting_value=0
@@ -722,15 +774,29 @@ cmd_args() {
         # the source --help was too irregular for tier 1 to split the value
         # out; see the parser comment above) before falling through to "what
         # else can I add", so that degraded case isn't just silently dropped.
-        local own; own=$(_spec_flags_expanded "$tool" "$sub" | awk -F'\t' -v f="$last" '$1==f{print $3; exit}')
+        local own; own=$(printf '%s\n' "$allflags" | awk -F'\t' -v f="$last" '$1==f{print $3; exit}')
         [ -n "$own" ] && printf '  \xe2\x80\xba %s: %s\n' "$last" "$own"
       fi
     else
-      # anything you typed that ISN'T the subcommand you just picked is
-      # something to narrow by -- with or without a leading dash. You don't
-      # always remember a flag's prefix, just a word buried in it ("admin"
-      # for --count-admin) -- see _keyword_rank for how that's found.
-      [ "$last" != "$sub" ] && filter="$last"
+      # not a flag on its own -- but the value might be glued directly onto
+      # it with no space, nmap-style ("-T4" for "-T <0-5>"): find the known
+      # value-taking flag that's a genuine prefix of what was typed.
+      local glued; glued=$(printf '%s\n' "$allflags" | awk -F'\t' -v last="$last" '
+        $2 != "-" && length($1) < length(last) && index(last, $1) == 1 { print; exit }')
+      if [ -n "$glued" ]; then
+        local galias="${glued%%$'\t'*}" grest="${glued#*$'\t'}"
+        local gval="${grest%%$'\t'*}" grest2="${grest#*$'\t'}"
+        local genum="${grest2#*$'\t'}"
+        awaiting_value=1
+        printf '  \xe2\x80\xba %s expects %s (glued onto %s, no space)\n' "$last" "$gval" "$galias"
+        [ -n "$genum" ] && printf '    one of: %s\n' "${genum//,/, }"
+      else
+        # anything you typed that ISN'T the subcommand you just picked is
+        # something to narrow by -- with or without a leading dash. You don't
+        # always remember a flag's prefix, just a word buried in it ("admin"
+        # for --count-admin) -- see _keyword_rank for how that's found.
+        [ "$last" != "$sub" ] && filter="$last"
+      fi
     fi
   fi
   [ "$awaiting_value" -eq 1 ] && return 0
@@ -744,56 +810,35 @@ cmd_args() {
   # separate section rather than silently merged into the first, so an
   # exact match is never buried among weaker ones.
   if [ -z "$sub" ]; then
-    local subs allsubs subs_extra="" shown="" ms
-    allsubs=$(_spec_subs "$tool")
+    local allsubs; allsubs=$(_spec_subs "$tool")
     if [ -n "$allsubs" ]; then
-      subs=$(printf '%s\n' "$allsubs" | _prefix_match "$filter")
-      if [ -n "$filter" ]; then
-        shown=$(printf '%s\n' "$subs" | cut -f1)
-        ms=3; [ -z "$subs" ] && ms=1
-        subs_extra=$(printf '%s\n' "$allsubs" | _keyword_extra "$filter" 2 "$shown" "$ms")
-      fi
-      # a prefix match found NOTHING -> subs_extra IS the whole answer, one
-      # plain section (this is _keyword_rank's own fallback role: any
-      # signal, including its weakest tiers, beats coming back empty). Only
-      # when prefix match found something too does the split into a second
-      # "also related" section actually mean anything.
-      if [ -z "$subs" ] && [ -n "$subs_extra" ]; then subs="$subs_extra"; subs_extra=""; fi
-      if [ -n "$subs" ]; then
+      _match_with_related "$allsubs" "$filter" 2
+      if [ -n "$MWR_PRIMARY" ]; then
         printf '  subcommands%s:\n' "${filter:+ matching \"$filter\"}"
-        printf '%s\n' "$subs" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
+        printf '%s\n' "$MWR_PRIMARY" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
         printf '\n'
       fi
-      if [ -n "$subs_extra" ]; then
+      if [ -n "$MWR_EXTRA" ]; then
         printf '  also related to "%s":\n' "$filter"
-        printf '%s\n' "$subs_extra" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
+        printf '%s\n' "$MWR_EXTRA" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
         printf '\n'
       fi
     fi
   fi
 
   # _spec_flags_expanded rows are alias|value|desc|enum -- description is
-  # field 3, not the _keyword_rank/_keyword_extra default of 2; told
-  # explicitly below. Same prefix-plus-related-section shape as subcommands.
-  local flags allflags flags_extra="" shown="" ms
-  allflags=$(_spec_flags_expanded "$tool" "$sub")
-  flags=$(printf '%s\n' "$allflags" | _prefix_match "$filter")
-  if [ -n "$filter" ]; then
-    shown=$(printf '%s\n' "$flags" | cut -f1)
-    ms=3; [ -z "$flags" ] && ms=1
-    flags_extra=$(printf '%s\n' "$allflags" | _keyword_extra "$filter" 3 "$shown" "$ms")
-  fi
-  if [ -z "$flags" ] && [ -n "$flags_extra" ]; then flags="$flags_extra"; flags_extra=""; fi
+  # field 3, not _match_with_related's default of 2; told explicitly below.
+  _match_with_related "$allflags" "$filter" 3
   printf '  flags%s%s:\n' "${sub:+ ($sub)}" "${filter:+ matching \"$filter\"}"
-  if [ -n "$flags" ]; then
-    printf '%s\n' "$flags" | awk -F'\t' '{
+  if [ -n "$MWR_PRIMARY" ]; then
+    printf '%s\n' "$MWR_PRIMARY" | awk -F'\t' '{
       v = ($2 == "-") ? "" : $2
       printf "    %-16s %-18s %s\n", $1, v, $3
     }'
   fi
-  if [ -n "$flags_extra" ]; then
+  if [ -n "$MWR_EXTRA" ]; then
     printf '\n  also related to "%s":\n' "$filter"
-    printf '%s\n' "$flags_extra" | awk -F'\t' '{
+    printf '%s\n' "$MWR_EXTRA" | awk -F'\t' '{
       v = ($2 == "-") ? "" : $2
       printf "    %-16s %-18s %s\n", $1, v, $3
     }'
@@ -818,10 +863,15 @@ cmd_lastline() {
   else
     line=$("${TM[@]}" capture-pane -p -t "$pane" 2>/dev/null | tail -1)
   fi
-  # strip a shell-prompt prefix ending in $/#/> + space. Anchored on the LAST
-  # such marker (greedy match) so a command that itself contains one --
-  # `curl url?a=1#frag`, `echo $HOME` -- isn't mistaken for the prompt boundary.
-  printf '%s' "$line" | sed -E 's/^.*[$#>] //'
+  # strip a shell-prompt prefix ending in $/#/> + space. Anchored on the
+  # FIRST such marker: a real prompt is always at the very start of the
+  # captured line, and matching leftmost (rather than a greedy `.*` that
+  # finds the LAST one) means a typed command with its own `$#>` further in
+  # -- `echo $HOME`, `curl url?a=1#frag`, or a redirect like `... > out.txt`
+  # -- doesn't get mistaken for extra prompt text and truncated away. Those
+  # examples don't actually collide with the boundary either way here, since
+  # the delimiter must be immediately followed by a space to count.
+  printf '%s' "$line" | sed -E 's/^[^$#>]*[$#>] //'
 }
 
 cmd_args_popup() {
@@ -853,6 +903,13 @@ cmd_complete() {
   local off; off=$(_spec_skip_wrappers "$cword" "${words[@]}")
   local tool="${words[$off]:-}"
   [ -n "$tool" ] && _spec_have_tool "$tool" || return 0
+  # still typing the tool's own name (cword hasn't moved past it yet) --
+  # that's plain command-name completion, not "what comes next for this
+  # tool," even if the partial word so far happens to already be a valid
+  # binary on PATH (e.g. "ls" while aiming for "lsblk"). bash has no
+  # equivalent of zsh's own `CURRENT > 1` guard for this, so enforce it here
+  # once for both.
+  [ "$cword" -gt "$off" ] || return 0
 
   local sub; sub=$(_spec_chosen_sub "$tool" "$((off+1))" "$cword" "${words[@]}")
 
@@ -876,19 +933,15 @@ cmd_complete() {
   rows="$({ [ -z "$sub" ] && _spec_subs "$tool"
             _spec_flags_expanded "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
           })"
-  candidates="$(printf '%s\n' "$rows" | _prefix_match "$cur")"
   # Beyond the exact prefix match, also surface anything conceptually
   # related that isn't already in it -- an exact hit on --user-agent
   # shouldn't make sensei go quiet about --current-user/--create-user just
   # because it already found something for "user". Appended after, not
-  # instead of, so the precise match still comes first.
-  if [ -n "$cur" ]; then
-    local shown ms extra
-    shown="$(printf '%s\n' "$candidates" | cut -f1)"
-    ms=3; [ -z "$candidates" ] && ms=1
-    extra="$(printf '%s\n' "$rows" | _keyword_extra "$cur" 2 "$shown" "$ms")"
-    [ -n "$extra" ] && candidates="${candidates:+$candidates$'\n'}$extra"
-  fi
+  # instead of, so the precise match still comes first (same policy as
+  # `cmd_args` -- see _match_with_related).
+  _match_with_related "$rows" "$cur" 2
+  candidates="$MWR_PRIMARY"
+  [ -n "$MWR_EXTRA" ] && candidates="${candidates:+$candidates$'\n'}$MWR_EXTRA"
   [ -n "$candidates" ] && printf '%s\n' "$candidates"
 }
 
