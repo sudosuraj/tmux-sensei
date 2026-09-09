@@ -40,6 +40,15 @@
 #     command with no completion of its own already.
 #   - `C-s H` — popup, prefilled from what's on the command line right now.
 #   - `sensei args <tool> [...]` by hand, any time.
+# Don't remember the exact flag, just a word buried in it? Type that word
+# with no dashes and no idea where it falls — "admin" finds --count-admin,
+# --admin-user, --admin-only, ranked by how directly it identifies each one
+# (see _keyword_rank). An exact prefix match never hides these either: typing
+# "--user" still surfaces --user-agent as the primary hit AND --username /
+# --create-user / --current-user right alongside it in a separate "also
+# related" section (see _keyword_extra) — remembering the concept is enough,
+# even when part of what you typed already matches something exactly. Works
+# the same in `sensei args`, C-s H, and real Tab.
 # See the ARGUMENT HELP section further down for how the parsing and caching
 # actually work, and its honest limits (a hand-written, irregularly-formatted
 # --help degrades to flag-names-only — still enough for Tab, just no clean
@@ -557,7 +566,10 @@ _spec_skip_wrappers() {  # prints the index of the real tool word, given argv wo
 # insensitive: a discovered metavar's casing is whatever the tool's own
 # --help used (FILE, File, file, ...), not something sensei controls anymore.
 _looks_like_path() {
-  case "${1,,}" in *file*|*path*|*wordlist*|*basename*|*output*|*log*|*dir*) return 0 ;; *) return 1 ;; esac
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *file*|*path*|*wordlist*|*basename*|*output*|*log*|*dir*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # best-effort: which subcommand (if any) has already been typed among
@@ -569,6 +581,84 @@ _spec_chosen_sub() {  # $1=tool $2=start $3=end -- word0 word1 ...
   for ((i = start; i < end; i++)); do
     if _spec_is_sub "$tool" "${w[$i]}"; then printf '%s' "${w[$i]}"; return; fi
   done
+}
+
+# keyword discovery: you don't always remember a flag's PREFIX, just some
+# word buried in it -- "admin" for --count-admin, no idea it starts with
+# "count" or even that it needs "--" at all. Given "name<TAB>desc" rows and
+# a keyword, ranks by how directly the keyword identifies the name: an exact
+# hyphen-separated WORD in the (dash-stripped) name beats a word merely
+# starting with it, which beats a substring within one word, which beats a
+# match that only appears once the hyphens are removed entirely (so a
+# keyword typed without knowing where the word boundary falls still hits),
+# which beats a match found only in the description -- the weakest signal,
+# but still a real one ("I don't remember the flag, just what it does").
+# This is a FALLBACK, not the primary filter: callers try an exact prefix
+# match first (fast, precise, keeps "-s<Tab>" behaving exactly as before)
+# and only reach for this when that comes back with nothing.
+_keyword_rank() {  # $1=keyword [$2=desc field, default 2] [$3=min score, default 1]
+  # rows (tab-separated, name always $1) on stdin -> same rows, ranked, ANY
+  # other fields (value/enum, if the caller has them) passed through
+  # untouched -- only the name and description fields drive scoring.
+  # min-score lets a caller that already found something by prefix demand a
+  # stronger signal before adding more (see _keyword_extra) -- score 5 down
+  # to 3 all say "this IS the word you typed, somewhere in the name"; 2 and
+  # 1 are much weaker (only visible once hyphens vanish, or only in the
+  # description) and are for when prefix matching found nothing at all.
+  local kw="$1" df="${2:-2}" minscore="${3:-1}"
+  [ -n "$kw" ] || return 0
+  awk -F'\t' -v kw="$kw" -v df="$df" -v minscore="$minscore" '
+    function lc(s) { return tolower(s) }
+    BEGIN {
+      lkw = lc(kw)
+      gsub(/^--?/, "", lkw)
+      if (lkw == "") exit
+    }
+    {
+      name = $1; desc = $df
+      base = name; gsub(/^--?/, "", base)
+      nodash = base; gsub(/-/, "", nodash)
+      n = split(base, w, "-")
+      score = 0
+      for (i = 1; i <= n; i++) {
+        lw = lc(w[i]); s = 0
+        if (lw == lkw) s = 5
+        else if (index(lw, lkw) == 1) s = 4
+        else if (index(lw, lkw) > 0) s = 3
+        if (s > score) score = s
+      }
+      if (score == 0 && index(lc(nodash), lkw) > 0) score = 2
+      if (score == 0 && desc != "" && index(lc(desc), lkw) > 0) score = 1
+      if (score >= minscore && score > 0) print score "\t" $0
+    }' | sort -t $'\t' -k1,1rn | cut -f2-
+}
+
+# exact-prefix rows only -- unchanged, always the fast/primary path.
+_prefix_match() {  # $1=query; "name<TAB>..." rows on stdin
+  local q="$1"
+  awk -F'\t' -v q="$q" 'q=="" || index($1,q)==1'
+}
+
+# keyword-related rows NOT already covered by an exclude-list, for
+# SUPPLEMENTING an existing result rather than replacing it -- an exact
+# prefix match ("--user-agent" for "--user") should never make sensei go
+# quiet about "--current-user"/"--create-user" just because it already
+# found something else. Two guards keep this from turning into noise:
+# a query under 3 chars (once a leading dash or two is stripped) is
+# exactly what prefix matching already does well, so it's left alone here;
+# and when the caller already has real prefix results, only score>=3
+# ("this word really is in the name") gets appended -- the weaker tiers
+# (visible only once hyphens are stripped, or only in the description)
+# are reserved for _keyword_rank's own default use as a last-resort
+# fallback when prefix matching found NOTHING, where any signal beats none.
+_keyword_extra() {  # $1=query $2=desc-field $3=exclude-names(newline list) $4=min-score(default 3)
+  local q="$1" df="$2" exclude="$3" minscore="${4:-3}"
+  local stripped="${q#--}"; stripped="${stripped#-}"
+  [ "${#stripped}" -ge 3 ] || return 0
+  _keyword_rank "$q" "$df" "$minscore" | awk -F'\t' -v ex="$exclude" '
+    BEGIN { n = split(ex, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") seen[a[i]] = 1 }
+    !($1 in seen)
+  '
 }
 
 # ── sensei args — human-facing: what comes next, right now ────────────────────
@@ -636,28 +726,78 @@ cmd_args() {
         [ -n "$own" ] && printf '  \xe2\x80\xba %s: %s\n' "$last" "$own"
       fi
     else
-      case "$last" in -*) filter="$last" ;; esac
+      # anything you typed that ISN'T the subcommand you just picked is
+      # something to narrow by -- with or without a leading dash. You don't
+      # always remember a flag's prefix, just a word buried in it ("admin"
+      # for --count-admin) -- see _keyword_rank for how that's found.
+      [ "$last" != "$sub" ] && filter="$last"
     fi
   fi
   [ "$awaiting_value" -eq 1 ] && return 0
   printf '\n'
 
-  # no subcommand chosen yet, and there's more than one -> list them
+  # no subcommand chosen yet, and there's more than one -> list them,
+  # narrowed by the same filter as the flags below: an exact prefix match
+  # first, PLUS anything conceptually related that isn't already in it (an
+  # exact hit on one subcommand shouldn't make sensei go quiet about others
+  # just because it already found something) -- shown as its own clearly-
+  # separate section rather than silently merged into the first, so an
+  # exact match is never buried among weaker ones.
   if [ -z "$sub" ]; then
-    local subs; subs=$(_spec_subs "$tool")
-    if [ -n "$subs" ]; then
-      printf '  subcommands:\n'
-      printf '%s\n' "$subs" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
-      printf '\n'
+    local subs allsubs subs_extra="" shown="" ms
+    allsubs=$(_spec_subs "$tool")
+    if [ -n "$allsubs" ]; then
+      subs=$(printf '%s\n' "$allsubs" | _prefix_match "$filter")
+      if [ -n "$filter" ]; then
+        shown=$(printf '%s\n' "$subs" | cut -f1)
+        ms=3; [ -z "$subs" ] && ms=1
+        subs_extra=$(printf '%s\n' "$allsubs" | _keyword_extra "$filter" 2 "$shown" "$ms")
+      fi
+      # a prefix match found NOTHING -> subs_extra IS the whole answer, one
+      # plain section (this is _keyword_rank's own fallback role: any
+      # signal, including its weakest tiers, beats coming back empty). Only
+      # when prefix match found something too does the split into a second
+      # "also related" section actually mean anything.
+      if [ -z "$subs" ] && [ -n "$subs_extra" ]; then subs="$subs_extra"; subs_extra=""; fi
+      if [ -n "$subs" ]; then
+        printf '  subcommands%s:\n' "${filter:+ matching \"$filter\"}"
+        printf '%s\n' "$subs" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
+        printf '\n'
+      fi
+      if [ -n "$subs_extra" ]; then
+        printf '  also related to "%s":\n' "$filter"
+        printf '%s\n' "$subs_extra" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
+        printf '\n'
+      fi
     fi
   fi
 
+  # _spec_flags_expanded rows are alias|value|desc|enum -- description is
+  # field 3, not the _keyword_rank/_keyword_extra default of 2; told
+  # explicitly below. Same prefix-plus-related-section shape as subcommands.
+  local flags allflags flags_extra="" shown="" ms
+  allflags=$(_spec_flags_expanded "$tool" "$sub")
+  flags=$(printf '%s\n' "$allflags" | _prefix_match "$filter")
+  if [ -n "$filter" ]; then
+    shown=$(printf '%s\n' "$flags" | cut -f1)
+    ms=3; [ -z "$flags" ] && ms=1
+    flags_extra=$(printf '%s\n' "$allflags" | _keyword_extra "$filter" 3 "$shown" "$ms")
+  fi
+  if [ -z "$flags" ] && [ -n "$flags_extra" ]; then flags="$flags_extra"; flags_extra=""; fi
   printf '  flags%s%s:\n' "${sub:+ ($sub)}" "${filter:+ matching \"$filter\"}"
-  _spec_flags_expanded "$tool" "$sub" | awk -F'\t' -v pfx="$filter" '
-    pfx == "" || index($1, pfx) == 1 {
+  if [ -n "$flags" ]; then
+    printf '%s\n' "$flags" | awk -F'\t' '{
       v = ($2 == "-") ? "" : $2
       printf "    %-16s %-18s %s\n", $1, v, $3
     }'
+  fi
+  if [ -n "$flags_extra" ]; then
+    printf '\n  also related to "%s":\n' "$filter"
+    printf '%s\n' "$flags_extra" | awk -F'\t' '{
+      v = ($2 == "-") ? "" : $2
+      printf "    %-16s %-18s %s\n", $1, v, $3
+    }'
+  fi
 }
 
 # ── sensei args-popup — C-s H: same thing, live, prefilled from the pane ──────
@@ -732,10 +872,24 @@ cmd_complete() {
     fi
   fi
 
-  {
-    [ -z "$sub" ] && _spec_subs "$tool"
-    _spec_flags_expanded "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
-  } | awk -F'\t' -v cur="$cur" 'index($1, cur) == 1'
+  local candidates rows
+  rows="$({ [ -z "$sub" ] && _spec_subs "$tool"
+            _spec_flags_expanded "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
+          })"
+  candidates="$(printf '%s\n' "$rows" | _prefix_match "$cur")"
+  # Beyond the exact prefix match, also surface anything conceptually
+  # related that isn't already in it -- an exact hit on --user-agent
+  # shouldn't make sensei go quiet about --current-user/--create-user just
+  # because it already found something for "user". Appended after, not
+  # instead of, so the precise match still comes first.
+  if [ -n "$cur" ]; then
+    local shown ms extra
+    shown="$(printf '%s\n' "$candidates" | cut -f1)"
+    ms=3; [ -z "$candidates" ] && ms=1
+    extra="$(printf '%s\n' "$rows" | _keyword_extra "$cur" 2 "$shown" "$ms")"
+    [ -n "$extra" ] && candidates="${candidates:+$candidates$'\n'}$extra"
+  fi
+  [ -n "$candidates" ] && printf '%s\n' "$candidates"
 }
 
 # ── vpn/iface indicator ───────────────────────────────────────────────────────
@@ -1399,11 +1553,14 @@ cmd_setup_shell() {
   printf '  anything on PATH, not a fixed list — and a temporary completion menu\n'
   printf '  instead of a permanent scrollback dump for tools with many flags.\n'
   printf '  See: sensei args <tool>   ·   C-s H\n\n'
+  # bash's ble.sh (wired by ghosttext_bash below) must be the LAST line in
+  # .bashrc by its own requirement -- so every other bash block goes first,
+  # or a re-run would append after ble.sh's source line and break it.
+  _setup_shell_complete_bash
+  _setup_shell_menu_bash
   _setup_shell_ghosttext_bash
   _setup_shell_ghosttext_zsh
-  _setup_shell_complete_bash
   _setup_shell_complete_zsh
-  _setup_shell_menu_bash
   _setup_shell_menu_zsh
 }
 
@@ -1455,6 +1612,12 @@ cmd_help() {
                            (zsh) or cycles in place (bash), not a
                            permanent scrollback dump; also opt-in via
                            the same setup-shell run
+    don't remember the flag, just a word in it? type that word with no
+    dashes ("admin" finds --count-admin, --admin-only, ...) — matched
+    against the flag itself first, its description as a fallback. An
+    exact prefix match doesn't hide these: "--user" still shows
+    --user-agent as the main hit plus --username/--create-user/
+    --current-user under "also related to" right below it
 
   MODES & MISC
     S            toggle synchronize-panes (loud when armed — see README)
