@@ -1550,11 +1550,14 @@ cmd_setup_shell() {
   printf '  anything on PATH, not a fixed list — and a temporary completion menu\n'
   printf '  instead of a permanent scrollback dump for tools with many flags.\n'
   printf '  See: sensei args <tool>   ·   C-s H\n\n'
+  # bash's ble.sh (wired by ghosttext_bash below) must be the LAST line in
+  # .bashrc by its own requirement -- so every other bash block goes first,
+  # or a re-run would append after ble.sh's source line and break it.
+  _setup_shell_complete_bash
+  _setup_shell_menu_bash
   _setup_shell_ghosttext_bash
   _setup_shell_ghosttext_zsh
-  _setup_shell_complete_bash
   _setup_shell_complete_zsh
-  _setup_shell_menu_bash
   _setup_shell_menu_zsh
 }
 
