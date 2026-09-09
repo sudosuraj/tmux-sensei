@@ -566,7 +566,10 @@ _spec_skip_wrappers() {  # prints the index of the real tool word, given argv wo
 # insensitive: a discovered metavar's casing is whatever the tool's own
 # --help used (FILE, File, file, ...), not something sensei controls anymore.
 _looks_like_path() {
-  case "${1,,}" in *file*|*path*|*wordlist*|*basename*|*output*|*log*|*dir*) return 0 ;; *) return 1 ;; esac
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *file*|*path*|*wordlist*|*basename*|*output*|*log*|*dir*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # best-effort: which subcommand (if any) has already been typed among
