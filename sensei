@@ -40,6 +40,10 @@
 #     command with no completion of its own already.
 #   - `C-s H` — popup, prefilled from what's on the command line right now.
 #   - `sensei args <tool> [...]` by hand, any time.
+# Don't remember the exact flag, just a word buried in it? Type that word
+# with no dashes and no idea where it falls — "admin" finds --count-admin,
+# --admin-user, --admin-only, ranked by how directly it identifies each one
+# (see _keyword_rank). Works the same in `sensei args`, C-s H, and real Tab.
 # See the ARGUMENT HELP section further down for how the parsing and caching
 # actually work, and its honest limits (a hand-written, irregularly-formatted
 # --help degrades to flag-names-only — still enough for Tab, just no clean
@@ -571,6 +575,51 @@ _spec_chosen_sub() {  # $1=tool $2=start $3=end -- word0 word1 ...
   done
 }
 
+# keyword discovery: you don't always remember a flag's PREFIX, just some
+# word buried in it -- "admin" for --count-admin, no idea it starts with
+# "count" or even that it needs "--" at all. Given "name<TAB>desc" rows and
+# a keyword, ranks by how directly the keyword identifies the name: an exact
+# hyphen-separated WORD in the (dash-stripped) name beats a word merely
+# starting with it, which beats a substring within one word, which beats a
+# match that only appears once the hyphens are removed entirely (so a
+# keyword typed without knowing where the word boundary falls still hits),
+# which beats a match found only in the description -- the weakest signal,
+# but still a real one ("I don't remember the flag, just what it does").
+# This is a FALLBACK, not the primary filter: callers try an exact prefix
+# match first (fast, precise, keeps "-s<Tab>" behaving exactly as before)
+# and only reach for this when that comes back with nothing.
+_keyword_rank() {  # $1=keyword [$2=which field is the description, default 2]
+  # rows (tab-separated, name always $1) on stdin -> same rows, ranked, ANY
+  # other fields (value/enum, if the caller has them) passed through
+  # untouched -- only the name and description fields drive scoring.
+  local kw="$1" df="${2:-2}"
+  [ -n "$kw" ] || return 0
+  awk -F'\t' -v kw="$kw" -v df="$df" '
+    function lc(s) { return tolower(s) }
+    BEGIN {
+      lkw = lc(kw)
+      gsub(/^--?/, "", lkw)
+      if (lkw == "") exit
+    }
+    {
+      name = $1; desc = $df
+      base = name; gsub(/^--?/, "", base)
+      nodash = base; gsub(/-/, "", nodash)
+      n = split(base, w, "-")
+      score = 0
+      for (i = 1; i <= n; i++) {
+        lw = lc(w[i]); s = 0
+        if (lw == lkw) s = 5
+        else if (index(lw, lkw) == 1) s = 4
+        else if (index(lw, lkw) > 0) s = 3
+        if (s > score) score = s
+      }
+      if (score == 0 && index(lc(nodash), lkw) > 0) score = 2
+      if (score == 0 && desc != "" && index(lc(desc), lkw) > 0) score = 1
+      if (score > 0) print score "\t" $0
+    }' | sort -t $'\t' -k1,1rn | cut -f2-
+}
+
 # ── sensei args — human-facing: what comes next, right now ────────────────────
 # `sensei args nmap -sC -sV -` and `sensei args nmap` both work; so does a
 # single quoted string (that's what the C-s H popup passes). First call for a
@@ -636,28 +685,45 @@ cmd_args() {
         [ -n "$own" ] && printf '  \xe2\x80\xba %s: %s\n' "$last" "$own"
       fi
     else
-      case "$last" in -*) filter="$last" ;; esac
+      # anything you typed that ISN'T the subcommand you just picked is
+      # something to narrow by -- with or without a leading dash. You don't
+      # always remember a flag's prefix, just a word buried in it ("admin"
+      # for --count-admin) -- see _keyword_rank for how that's found.
+      [ "$last" != "$sub" ] && filter="$last"
     fi
   fi
   [ "$awaiting_value" -eq 1 ] && return 0
   printf '\n'
 
-  # no subcommand chosen yet, and there's more than one -> list them
+  # no subcommand chosen yet, and there's more than one -> list them,
+  # narrowed by the same filter as the flags below (exact prefix first,
+  # keyword-ranked fallback second) so a half-remembered subcommand name
+  # narrows this list too, not just the flags.
   if [ -z "$sub" ]; then
-    local subs; subs=$(_spec_subs "$tool")
-    if [ -n "$subs" ]; then
-      printf '  subcommands:\n'
-      printf '%s\n' "$subs" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
-      printf '\n'
+    local subs allsubs; allsubs=$(_spec_subs "$tool")
+    if [ -n "$allsubs" ]; then
+      subs=$(printf '%s\n' "$allsubs" | awk -F'\t' -v pfx="$filter" 'pfx=="" || index($1,pfx)==1')
+      [ -z "$subs" ] && [ -n "$filter" ] && subs=$(printf '%s\n' "$allsubs" | _keyword_rank "$filter")
+      if [ -n "$subs" ]; then
+        printf '  subcommands%s:\n' "${filter:+ matching \"$filter\"}"
+        printf '%s\n' "$subs" | awk -F'\t' '{printf "    %-14s %s\n", $1, $2}'
+        printf '\n'
+      fi
     fi
   fi
 
+  # _spec_flags_expanded rows are alias|value|desc|enum -- description is
+  # field 3, not the _keyword_rank default of 2; told explicitly below.
+  local flags allflags; allflags=$(_spec_flags_expanded "$tool" "$sub")
+  flags=$(printf '%s\n' "$allflags" | awk -F'\t' -v pfx="$filter" 'pfx=="" || index($1,pfx)==1')
+  [ -z "$flags" ] && [ -n "$filter" ] && flags=$(printf '%s\n' "$allflags" | _keyword_rank "$filter" 3)
   printf '  flags%s%s:\n' "${sub:+ ($sub)}" "${filter:+ matching \"$filter\"}"
-  _spec_flags_expanded "$tool" "$sub" | awk -F'\t' -v pfx="$filter" '
-    pfx == "" || index($1, pfx) == 1 {
+  if [ -n "$flags" ]; then
+    printf '%s\n' "$flags" | awk -F'\t' '{
       v = ($2 == "-") ? "" : $2
       printf "    %-16s %-18s %s\n", $1, v, $3
     }'
+  fi
 }
 
 # ── sensei args-popup — C-s H: same thing, live, prefilled from the pane ──────
@@ -732,10 +798,16 @@ cmd_complete() {
     fi
   fi
 
-  {
-    [ -z "$sub" ] && _spec_subs "$tool"
-    _spec_flags_expanded "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
-  } | awk -F'\t' -v cur="$cur" 'index($1, cur) == 1'
+  local candidates rows
+  rows="$({ [ -z "$sub" ] && _spec_subs "$tool"
+            _spec_flags_expanded "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
+          })"
+  candidates="$(printf '%s\n' "$rows" | awk -F'\t' -v cur="$cur" 'index($1, cur) == 1')"
+  # a bare word with no prefix match at all -- "admin" for --count-admin,
+  # not knowing it starts with "count" or needs "--" -- falls back to
+  # keyword ranking instead of coming back empty (see _keyword_rank).
+  [ -z "$candidates" ] && [ -n "$cur" ] && candidates="$(printf '%s\n' "$rows" | _keyword_rank "$cur")"
+  [ -n "$candidates" ] && printf '%s\n' "$candidates"
 }
 
 # ── vpn/iface indicator ───────────────────────────────────────────────────────
@@ -1455,6 +1527,9 @@ cmd_help() {
                            (zsh) or cycles in place (bash), not a
                            permanent scrollback dump; also opt-in via
                            the same setup-shell run
+    don't remember the flag, just a word in it? type that word with no
+    dashes ("admin" finds --count-admin, --admin-only, ...) — matched
+    against the flag itself first, its description as a fallback
 
   MODES & MISC
     S            toggle synchronize-panes (loud when armed — see README)
