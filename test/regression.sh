@@ -228,6 +228,35 @@ if __name__ == "__main__":
 EOF
 chmod +x "$WORK/bin/clicktool"
 
+# ── fixture: overlapping compound flag for multi-word keyword ranking ──────
+cat > "$WORK/bin/ranktool" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  --target-domain) TD="$2"; shift 2 ;;
+  --target) T="$2"; shift 2 ;;
+  --domain) D="$2"; shift 2 ;;
+  --timeout) TO="$2"; shift 2 ;;
+esac
+EOF
+chmod +x "$WORK/bin/ranktool"
+
+# ── fixture: a second, unrelated vocabulary family -- ranking must not be
+# hardcoded to "target"/"domain"/"user", and a candidate matching the SAME
+# number of query words as another must still be told apart by match
+# PRECISION, not simply by which one is longer or shorter.
+cat > "$WORK/bin/formattool" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  --output-format) OF="$2"; shift 2 ;;
+  --output-format-verbose) OFV="$2"; shift 2 ;;
+  --output) O="$2"; shift 2 ;;
+  --format) F="$2"; shift 2 ;;
+  --target-list) TL="$2"; shift 2 ;;
+  --target) T="$2"; shift 2 ;;
+esac
+EOF
+chmod +x "$WORK/bin/formattool"
+
 rm -rf "$SENSEI_SPEC_CACHE"
 
 printf '\n1. Nested bash case scoping does not leak\n'
@@ -371,6 +400,36 @@ assert_not_contains "clicktool scan does NOT list its own handler function as a 
 assert_not_contains "clicktool report does NOT list its own handler function as a candidate" "$click_report_complete" 'func'
 discover_func="$("$SENSEI" discover scan "$WORK/bin/clicktool" 2>&1)"
 assert_contains "sensei discover (structural search) still finds the scan() function" "$discover_func" 'func'
+
+printf '\n13. Multi-word keyword queries boost a candidate matching several concepts\n'
+rank_multi="$("$SENSEI" args ranktool target domain 2>&1)"
+first_multi="$(printf '%s\n' "$rank_multi" | awk '/^  flags/{f=1;next} f && NF{print; exit}' | awk '{print $1}')"
+[ "$first_multi" = "--target-domain" ] && ok "--target-domain (matches BOTH \"target\" and \"domain\") ranks first" || bad "expected --target-domain first, got: $first_multi"
+assert_contains     "ranktool target domain also surfaces --target"    "$rank_multi" '--target'
+assert_contains     "ranktool target domain also surfaces --domain"    "$rank_multi" '--domain'
+assert_not_contains "ranktool target domain does NOT surface --timeout (matches neither word)" "$rank_multi" '--timeout'
+# same query, run twice -- the ranking must be the same both times (a
+# stable sort, not an incidental alphabetical tiebreak among ties).
+rank_multi_2="$("$SENSEI" args ranktool target domain 2>&1)"
+[ "$rank_multi" = "$rank_multi_2" ] && ok "multi-word ranking is deterministic across repeated runs" || bad "ranking changed between two identical runs"
+
+printf '\n14. Ranking is generic: a second, unrelated vocabulary family\n'
+of_out="$("$SENSEI" args formattool output format 2>&1)"
+of_flags="$(printf '%s\n' "$of_out" | awk '/^  flags/{f=1;next} f && NF')"
+first_of="$(printf '%s\n' "$of_flags" | sed -n '1p' | awk '{print $1}')"
+[ "$first_of" = "--output-format" ] && ok "--output-format (matches BOTH \"output\" and \"format\") ranks first" || bad "expected --output-format first, got: $first_of"
+second_of="$(printf '%s\n' "$of_flags" | sed -n '2p' | awk '{print $1}')"
+[ "$second_of" = "--output-format-verbose" ] && ok "--output-format-verbose (also matches both, but less precisely) ranks second, ahead of single-word matches" || bad "expected --output-format-verbose second, got: $second_of"
+assert_contains "formattool output format still surfaces --output" "$of_out" '--output'
+assert_contains "formattool output format still surfaces --format" "$of_out" '--format'
+
+# structure over raw length, single-word query: an EXACT whole-name match
+# beats a longer candidate that only contains the word as one of several --
+# --target must outrank the longer --target-list for query "target",
+# never the other way around just because --target-list is longer.
+tl_out="$("$SENSEI" complete 1 formattool "target" 2>&1)"
+first_tl="$(printf '%s\n' "$tl_out" | head -1 | cut -f1)"
+[ "$first_tl" = "--target" ] && ok "--target (exact match) outranks the longer --target-list for query \"target\"" || bad "expected --target first, got: $first_tl"
 
 echo
 if [ "$fail" -eq 0 ]; then

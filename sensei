@@ -1613,7 +1613,41 @@ _spec_chosen_sub() {  # $1=tool $2=start $3=end -- word0 word1 ...
 # replacing how it's queried -- and that's a real architectural addition
 # to make deliberately, not something to fake by piling on synonym
 # regexes here until this function can no longer be reasoned about.
-_keyword_rank() {  # $1=keyword [$2=desc field, default 2] [$3=min score, default 1]
+#
+# MULTI-WORD queries ("target domain", typed as separate shell words to
+# `sensei args tool target domain`, not "--target-domain" as one already-
+# hyphenated guess -- splitting is on WHITESPACE only, never on a hyphen
+# inside a single typed token, so a half-remembered exact flag name stays
+# one unit) score each space-separated word of the query independently,
+# using the exact same 6 tiers above, then rank candidates by THREE
+# numbers, in order:
+#   1. matched   -- how many of the query's words this candidate scored a
+#      REAL word-level match on (tier 3 or better; the same bar
+#      _keyword_extra already uses for "a real match, not just noise").
+#      This is the deliberate, structural answer to "a longer candidate
+#      can still be more relevant when it contains multiple matching
+#      keywords": --target-domain matches BOTH "target" and "domain" (tier
+#      5 each, since each is one hyphen-word of a flag that has others),
+#      so matched=2 -- strictly ahead of --target or --domain alone, each
+#      of which can only ever match ONE query word (matched=1) no matter
+#      how perfectly. Candidate length never enters this comparison
+#      directly; a longer name only wins because it covers more of what
+#      was actually asked for.
+#   2. total     -- the sum of all per-word tier scores, breaking ties
+#      among candidates that matched the same NUMBER of words by how
+#      PRECISELY they matched them (two tier-6 hits beats a tier-6 and a
+#      tier-3).
+#   3. length(base) ascending -- the original single-word tiebreak,
+#      unchanged, as the final, deterministic fallback.
+# The underlying sort is explicitly STABLE (-s): two candidates tied on
+# all three numbers above keep whatever order they arrived in rather than
+# an incidental alphabetical-of-the-remaining-fields comparison sort would
+# otherwise fall back to -- deterministic run-to-run for the same input,
+# with no hidden fourth ranking signal nobody decided on.
+# A single-word query is just the k=1 case of all of the above: matched
+# is always 0 or 1, total equals that one tier score exactly, and the
+# ranking this produces is identical to the original single-tier version.
+_keyword_rank() {  # $1=keyword(space-separated words ok) [$2=desc field, default 2] [$3=min score, default 1]
   # rows (tab-separated, name always $1) on stdin -> same rows, ranked, ANY
   # other fields (value/enum, if the caller has them) passed through
   # untouched -- only the name and description fields drive scoring.
@@ -1622,31 +1656,44 @@ _keyword_rank() {  # $1=keyword [$2=desc field, default 2] [$3=min score, defaul
   awk -F'\t' -v kw="$kw" -v df="$df" -v minscore="$minscore" '
     function lc(s) { return tolower(s) }
     BEGIN {
-      lkw = lc(kw)
-      gsub(/^--?/, "", lkw)
-      if (lkw == "") exit
+      nraw = split(kw, kwraw, /[ \t]+/)
+      k = 0
+      for (ki = 1; ki <= nraw; ki++) {
+        one = lc(kwraw[ki]); gsub(/^--?/, "", one)
+        if (one != "") { k++; lkws[k] = one }
+      }
+      if (k == 0) exit
     }
     {
       name = $1; desc = $df
       base = name; gsub(/^--?/, "", base)
       lbase = lc(base)
       nodash = base; gsub(/-/, "", nodash)
+      lnodash = lc(nodash)
+      ldesc = lc(desc)
       n = split(base, w, "-")
-      score = 0
-      if (lbase == lkw) score = 6
-      if (score == 0) {
-        for (i = 1; i <= n; i++) { if (lc(w[i]) == lkw) { score = 5; break } }
+      matched = 0; total = 0; maxs = 0
+      for (ki = 1; ki <= k; ki++) {
+        lkw = lkws[ki]
+        score = 0
+        if (lbase == lkw) score = 6
+        if (score == 0) {
+          for (i = 1; i <= n; i++) { if (lc(w[i]) == lkw) { score = 5; break } }
+        }
+        if (score == 0) {
+          for (i = 1; i <= n; i++) { if (index(lc(w[i]), lkw) == 1) { score = 4; break } }
+        }
+        if (score == 0) {
+          for (i = 1; i <= n; i++) { if (index(lc(w[i]), lkw) > 0) { score = 3; break } }
+        }
+        if (score == 0 && index(lnodash, lkw) > 0) score = 2
+        if (score == 0 && desc != "" && index(ldesc, lkw) > 0) score = 1
+        if (score >= 3) matched++
+        total += score
+        if (score > maxs) maxs = score
       }
-      if (score == 0) {
-        for (i = 1; i <= n; i++) { if (index(lc(w[i]), lkw) == 1) { score = 4; break } }
-      }
-      if (score == 0) {
-        for (i = 1; i <= n; i++) { if (index(lc(w[i]), lkw) > 0) { score = 3; break } }
-      }
-      if (score == 0 && index(lc(nodash), lkw) > 0) score = 2
-      if (score == 0 && desc != "" && index(lc(desc), lkw) > 0) score = 1
-      if (score >= minscore && score > 0) print score "\t" length(base) "\t" $0
-    }' | sort -t $'\t' -k1,1rn -k2,2n | cut -f3-
+      if (maxs >= minscore && maxs > 0) print matched "\t" total "\t" length(base) "\t" $0
+    }' | sort -s -t $'\t' -k1,1rn -k2,2rn -k3,3n | cut -f4-
 }
 
 # exact-prefix rows only -- unchanged, always the fast/primary path.
@@ -1829,7 +1876,21 @@ cmd_args() {
         # something to narrow by -- with or without a leading dash. You don't
         # always remember a flag's prefix, just a word buried in it ("admin"
         # for --count-admin) -- see _keyword_rank for how that's found.
-        [ "$last" != "$sub" ] && filter="$last"
+        #
+        # Every leftover word joins the filter, not just the trailing one:
+        # "sensei args tool target domain" is someone describing a CONCEPT
+        # in more than one word ("the target's domain"), not two unrelated
+        # guesses -- see _keyword_rank's multi-word scoring for how a
+        # candidate matching several of these words at once (--target-domain
+        # for "target domain") outranks one matching only a single word
+        # (--target or --domain alone), however that candidate compares in
+        # length.
+        local j leftover=""
+        for ((j = off + 1; j < n; j++)); do
+          [ "${words[$j]}" = "$sub" ] && continue
+          leftover="${leftover:+$leftover }${words[$j]}"
+        done
+        filter="$leftover"
       fi
     fi
   fi
