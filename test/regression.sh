@@ -178,6 +178,37 @@ esac
 EOF
 chmod +x "$WORK/bin/mixedstyletool"
 
+# ── fixture: an inner case's closing `esac` shares a line with the last
+# arm's own terminator ("*) shift ;; esac", completely ordinary style) --
+# regression for a real bug where this specific esac placement was never
+# recognized, leaving casedepth stuck and leaking scope into every case
+# statement parsed for the rest of the file.
+cat > "$WORK/bin/esaclinetool" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  scan)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --target) TARGET="$2"; shift 2 ;;
+        *) shift ;; esac
+    done
+    ;;
+  report)
+    shift
+    ;;
+esac
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --verbose) VERBOSE=1; shift ;;
+    --config) CONFIG="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+EOF
+chmod +x "$WORK/bin/esaclinetool"
+
 # ── fixture: argparse value-taking/metadata, interpreter deliberately
 # missing (python3-notreal) so --help can never run and every result below
 # is forced through static analysis alone -- a real interpreter would also
@@ -400,6 +431,24 @@ assert_not_contains "clicktool scan does NOT list its own handler function as a 
 assert_not_contains "clicktool report does NOT list its own handler function as a candidate" "$click_report_complete" 'func'
 discover_func="$("$SENSEI" discover scan "$WORK/bin/clicktool" 2>&1)"
 assert_contains "sensei discover (structural search) still finds the scan() function" "$discover_func" 'func'
+
+printf '\n12b. esac sharing a line with the last arm'"'"'s own ;; does not leak scope\n'
+# If casedepth never came back down after the inner case's "*) shift ;;
+# esac" line, curarm would stay stuck on "scan" forever -- so --verbose/
+# --config (parsed in a totally separate, later, top-level loop) would
+# wrongly end up scoped to "scan" specifically, rather than truly global.
+# A truly global flag shows under EVERY subcommand (by design -- see
+# _spec_flags_expanded); a flag mis-scoped to "scan" would show under scan
+# but NOT under the unrelated "report" subcommand. Checking both is what
+# tells "correctly global" apart from "leaked into scan".
+esacline_scan="$("$SENSEI" args esaclinetool scan 2>&1)"
+esacline_report="$("$SENSEI" args esaclinetool report 2>&1)"
+assert_contains "esaclinetool scan shows its own --target"                    "$esacline_scan"   '--target'
+assert_contains "esaclinetool scan shows --verbose (correctly global)"        "$esacline_scan"   '--verbose'
+assert_contains "esaclinetool scan shows --config (correctly global)"         "$esacline_scan"   '--config'
+assert_contains "esaclinetool report ALSO shows --verbose (proves it's global, not stuck on scan)" "$esacline_report" '--verbose'
+assert_contains "esaclinetool report ALSO shows --config (proves it's global, not stuck on scan)"  "$esacline_report" '--config'
+assert_not_contains "esaclinetool report does NOT show --target (scan-only)"  "$esacline_report" '--target'
 
 printf '\n13. Multi-word keyword queries boost a candidate matching several concepts\n'
 rank_multi="$("$SENSEI" args ranktool target domain 2>&1)"

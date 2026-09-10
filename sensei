@@ -641,10 +641,6 @@ FNR == 1 { depth = 0; casedepth = 0; curarm = ""; pend_active = 0; pendletter = 
   # pattern or `esac` legitimately ends an arm.
   if (t ~ /^case[ \t].*[ \t]in$/) {
     casestack[casedepth] = curarm; casedepth++
-  } else if (t == "esac" || t ~ /^esac[ \t;]/) {
-    finalize_pending()
-    if (casedepth > 0) casedepth--
-    curarm = casestack[casedepth]
   } else if (casedepth > 0) {
     # A case arm is "PATTERN) BODY ;;" -- three tokens with no requirement
     # they land on separate lines. Rather than a second, whole-line-only
@@ -656,8 +652,27 @@ FNR == 1 { depth = 0; casedepth = 0; curarm = ""; pend_active = 0; pendletter = 
     # across a different number of lines. Every transition (a new
     # pattern, or `;;`) finalizes whatever was pending first, exactly as
     # the multi-line path already did.
+    #
+    # `esac` is just as much a token in this same sequence as `;;` or a
+    # pattern -- it doesn't only ever stand alone on its own line ("*)
+    # shift ;; esac", the LAST arm's terminator and its closing esac
+    # sharing one line, is completely ordinary shell style). Handling it
+    # only as a whole-line match (the older version of this) missed that
+    # case entirely: casedepth never came back down, so scope silently
+    # leaked into every case statement parsed for the rest of the file.
+    # Checking for it first, right here in the same per-token loop, makes
+    # it exactly as reliable as pattern/`;;` recognition already are,
+    # instead of a second, less-capable path for the same token.
     rest = t
     while (rest != "") {
+      if (match(rest, /^esac([ \t;]|$)/)) {
+        finalize_pending()
+        if (casedepth > 0) casedepth--
+        curarm = casestack[casedepth]
+        rest = substr(rest, 5)
+        gsub(/^[ \t]+/, "", rest)
+        continue
+      }
       if (match(rest, /^[-A-Za-z0-9_|]+\)/)) {
         finalize_pending()
         isdecl = 1
