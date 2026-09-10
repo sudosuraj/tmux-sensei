@@ -22,6 +22,9 @@
 #   sensei args-popup <pane_id>     -> C-s H: same, in a popup, prefilled from
 #                                    what's currently typed in that pane
 #   sensei discover <tool> [sub]    -> force a fresh probe, ignoring the cache
+#   sensei discover <keyword> <path> -> static-analysis-only keyword search of
+#                                    a file/project directly, no PATH lookup,
+#                                    no --help, nothing executed
 #   sensei tools                    -> list every tool sensei has looked at so far
 #   sensei complete ...             -> machine-facing: feeds real Tab-completion,
 #                                    wired up by `sensei setup-shell`
@@ -31,15 +34,24 @@
 # replays what you've typed before. It has nothing to say about a tool you're
 # using for the first time, or the one flag in fifty you never remember. This
 # is the other half, and it's fully dynamic: no built-in tool list, nothing to
-# maintain, nothing to configure. sensei runs `<tool> --help` (falling back to
-# `-h`), parses whatever comes back into flags/subcommands/values, and caches
-# the result — so it works on anything already on your $PATH, including a
-# tool you wrote yourself yesterday, the moment you use it. Three ways in:
+# maintain, nothing to configure. --help/-h is ONE source, not the foundation
+# -- plenty of real pentest tooling is a hand-rolled wrapper script or a
+# one-off with no working --help at all, so sensei ALSO reads a resolved
+# tool's own source directly (functions, getopts/case-based flag parsing,
+# argparse/click calls, Makefile targets, top-level variables -- never
+# executing it, see the STATIC ANALYSIS section) and merges both sources
+# into the same cache -- so it works on anything already on your $PATH,
+# including a tool you wrote yourself yesterday that doesn't even respond to
+# --help, the moment you use it. `sensei discover <keyword> <path>` runs the
+# same static analysis directly against a file or project, no $PATH lookup
+# needed at all. Four ways in:
 #   - Tab, for real, in your shell — `sensei setup-shell` wires up bash's/zsh's
 #     DEFAULT completer (not per-tool registration), so it applies to any
 #     command with no completion of its own already.
 #   - `C-s H` — popup, prefilled from what's on the command line right now.
 #   - `sensei args <tool> [...]` by hand, any time.
+#   - `sensei discover <keyword> <path>` — a file or project directly, for a
+#     script that isn't even on $PATH yet.
 # Don't remember the exact flag, just a word buried in it? Type that word
 # with no dashes and no idea where it falls — "admin" finds --count-admin,
 # --admin-user, --admin-only, ranked by how directly it identifies each one
@@ -433,6 +445,240 @@ AWKEOF
 _parse_flags() { awk -v TOOL="$1" -v SUB="$2" "$(_flags_awk_src)"; }   # help text on stdin
 _parse_subs()  { awk "$(_subs_awk_src)"; }                              # help text on stdin
 
+# ── STATIC ANALYSIS — understanding a tool that has no usable --help ──────────
+# --help/-h is a convention, not a guarantee: plenty of real pentest tooling
+# is a hand-rolled wrapper script, a Python one-off, a Makefile full of
+# recon targets, or something with its own non-standard help mechanism (or
+# none at all). Rather than treating --help as the foundation, it's ONE
+# source; this is a second, independent one that reads the tool's own
+# source instead of running it, and the two get MERGED (see
+# _write_top_cache_body) so a tool that has decent --help but ALSO defines
+# helper functions still surfaces both, and a tool with NO --help at all
+# still surfaces whatever this can read from it directly.
+#
+# Emits the same F/S row shapes _parse_flags/_parse_subs do, plus a new "N"
+# (named-item) row for things that aren't really CLI flags but are still
+# useful to search by concept -- a function, a top-level config-like
+# variable, a Makefile target: "N|tool|kind|name|desc".
+#
+# Deliberately narrow in what it calls a "flag": static analysis can find
+# names and structure, but rarely the value/enum precision a real --help
+# gives for free, so it fills in value="-" (boolean-shaped) unless the
+# source made a value obvious. It is honest about that, the same way the
+# --help parser is honest about a hand-written, irregular help text
+# degrading to flag-names-only (see the note above).
+_script_kind() {  # $1=path -> sh|python|ruby|perl|powershell|make|text|binary
+  local p="$1"
+  case "${p##*/}" in
+    Makefile|makefile|GNUmakefile) printf 'make'; return ;;
+  esac
+  case "$p" in
+    *.mk) printf 'make'; return ;;
+    *.py) printf 'python'; return ;;
+    *.rb) printf 'ruby'; return ;;
+    *.pl|*.pm) printf 'perl'; return ;;
+    *.ps1|*.psm1) printf 'powershell'; return ;;
+    *.sh|*.bash) printf 'sh'; return ;;
+  esac
+  # binary-vs-text FIRST, before ever reading a "line" from the file: a
+  # compiled ELF/PE has no guaranteed newline for a long stretch, so
+  # `head -1` on one can read a large chunk of raw binary straight into a
+  # bash command substitution -- which then silently mangles embedded NUL
+  # bytes and prints "ignored null byte in input" to stderr on every single
+  # probe of every single real binary. Classifying first (a real pipe to
+  # grep, not a variable capture, so raw bytes are never round-tripped
+  # through a bash string) means a binary never reaches that read at all.
+  # Reuses grep's OWN binary-detection heuristic (`-I` = treat a binary
+  # match as no-match) rather than hand-rolling a NUL-byte pattern: bash's
+  # $'\x00' quoting can't actually hold a NUL (it truncates to an empty
+  # string), which silently turned an earlier version of this check into
+  # an always-true empty-pattern match -- misclassifying every plain-text
+  # script with no recognized extension or shebang as "binary".
+  if ! head -c 4096 "$p" 2>/dev/null | grep -Iqm1 '' 2>/dev/null; then
+    printf 'binary'; return
+  fi
+  local shebang; shebang="$(head -c 200 "$p" 2>/dev/null | head -1)"
+  case "$shebang" in
+    '#!'*bash*|'#!'*/sh|'#!'*/sh\ *|'#!'*dash*) printf 'sh'; return ;;
+    '#!'*python*) printf 'python'; return ;;
+    '#!'*ruby*) printf 'ruby'; return ;;
+    '#!'*perl*) printf 'perl'; return ;;
+    '#!'*pwsh*|'#!'*powershell*) printf 'powershell'; return ;;
+  esac
+  printf 'text'
+}
+
+_analyze_sh_awk() {
+cat <<'AWKEOF'
+function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+BEGIN { depth = 0; incase = 0 }
+{
+  t = trim($0)
+  if (t == "" || t ~ /^#/) next
+
+  if (match(t, /^(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*\(\)/)) {
+    name = substr(t, RSTART, RLENGTH)
+    sub(/^function[ \t]+/, "", name); sub(/\(\)$/, "", name)
+    if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name }
+  } else if (match(t, /^function[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+    name = substr(t, RSTART, RLENGTH); sub(/^function[ \t]+/, "", name)
+    if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name }
+  }
+
+  if (t ~ /^case[ \t].*[ \t]in$/) incase++
+  else if (t == "esac" || t ~ /^esac[ \t;]/) { if (incase > 0) incase-- }
+  else if (incase > 0 && match(t, /^[-A-Za-z0-9_|]+\)[ \t]*$/)) {
+    patt = t; sub(/\)[ \t]*$/, "", patt)
+    n = split(patt, toks, "|")
+    flags = ""
+    for (i = 1; i <= n; i++) {
+      tk = trim(toks[i])
+      if (tk ~ /^--?[A-Za-z][A-Za-z0-9_-]*$/) flags = (flags == "" ? tk : flags "," tk)
+    }
+    if (flags != "" && !(flags in seenflag)) {
+      seenflag[flags] = 1
+      printf "F|%s||%s|-|option handled in this script's argument parser|\n", TOOL, flags
+    }
+  }
+
+  if (match(t, /getopts[ \t]+"[^"]*"/)) {
+    seg = substr(t, RSTART, RLENGTH)
+    qs = seg; sub(/^getopts[ \t]+"/, "", qs); sub(/"$/, "", qs)
+    i = 1
+    while (i <= length(qs)) {
+      c = substr(qs, i, 1)
+      if (c == ":") { i++; continue }
+      key = "-" c
+      if (!(key in seenflag)) {
+        seenflag[key] = 1
+        if (substr(qs, i + 1, 1) == ":") printf "F|%s||%s|<value>|option parsed via getopts|\n", TOOL, key
+        else printf "F|%s||%s|-|option parsed via getopts|\n", TOOL, key
+      }
+      i += (substr(qs, i + 1, 1) == ":") ? 2 : 1
+    }
+  }
+
+  if (depth == 0 && incase == 0 && match(t, /^[A-Z][A-Z0-9_]*=/)) {
+    name = t; sub(/=.*/, "", name)
+    if (!(name in seenvar)) { seenvar[name] = 1; printf "N|%s|var|%s|top-level variable set in this script\n", TOOL, name }
+  }
+
+  tmp = t; op = gsub(/\{/, "{", tmp); cl = gsub(/\}/, "}", tmp)
+  depth += op - cl
+  if (depth < 0) depth = 0
+}
+AWKEOF
+}
+
+_analyze_python_awk() {
+cat <<'AWKEOF'
+{
+  line = $0
+  if (match(line, /add_argument\(/) || match(line, /click\.option\(/)) {
+    rest = line; flags = ""; count = 0
+    while (count < 2 && match(rest, /['"]-[-A-Za-z0-9_]+['"]/)) {
+      tok = substr(rest, RSTART + 1, RLENGTH - 2)
+      flags = (flags == "" ? tok : flags "," tok)
+      rest = substr(rest, RSTART + RLENGTH)
+      count++
+    }
+    desc = ""
+    if (match(line, /help[ \t]*=[ \t]*['"][^'"]*['"]/)) {
+      seg = substr(line, RSTART, RLENGTH)
+      sub(/^help[ \t]*=[ \t]*['"]/, "", seg); sub(/['"]$/, "", seg)
+      desc = seg
+    }
+    if (flags != "" && !(flags in seenflag)) {
+      seenflag[flags] = 1
+      printf "F|%s||%s|-|%s|\n", TOOL, flags, (desc == "" ? "argument parsed by this script" : desc)
+    }
+  }
+  if (match(line, /^def[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/)) {
+    name = line; sub(/^def[ \t]+/, "", name); sub(/[ \t]*\(.*/, "", name)
+    if (name != "" && substr(name, 1, 1) != "_" && !(name in seenfn)) {
+      seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name
+    }
+  }
+}
+AWKEOF
+}
+
+_analyze_make_awk() {
+cat <<'AWKEOF'
+{
+  line = $0
+  if (line ~ /^\t/) next
+  if (line ~ /^\./) next
+  if (match(line, /^[A-Za-z0-9_.%\/-]+[ \t]*:([^=]|$)/)) {
+    tgt = line; sub(/:.*/, "", tgt); gsub(/[ \t]+$/, "", tgt)
+    if (tgt != "" && !(tgt in seentgt)) { seentgt[tgt] = 1; printf "N|%s|target|%s|Makefile target\n", TOOL, tgt }
+  } else if (match(line, /^[A-Za-z_][A-Za-z0-9_]*[ \t]*[:+?]?=/)) {
+    v = line; sub(/[ \t]*[:+?]?=.*/, "", v)
+    if (v != "" && !(v in seenvar)) { seenvar[v] = 1; printf "N|%s|var|%s|Makefile variable\n", TOOL, v }
+  }
+}
+AWKEOF
+}
+
+# ruby/perl/powershell share one lighter-weight pass -- function/sub defs
+# only. Their own flag-parsing conventions (OptionParser, Getopt::Long,
+# param() blocks) are real but varied enough that a shallow regex risks
+# more false positives than it's worth; function names alone still make
+# `tool <concept><Tab>` find something real instead of nothing, which is
+# the honest, narrower win this makes for these three.
+_analyze_misc_awk() {
+cat <<'AWKEOF'
+{
+  line = $0
+  if (KIND == "ruby" && match(line, /^def[ \t]+[A-Za-z_][A-Za-z0-9_?!]*/)) {
+    name = substr(line, RSTART, RLENGTH); sub(/^def[ \t]+/, "", name)
+  } else if (KIND == "perl" && match(line, /^sub[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+    name = substr(line, RSTART, RLENGTH); sub(/^sub[ \t]+/, "", name)
+  } else if (KIND == "powershell" && match(line, /^function[ \t]+[A-Za-z_][A-Za-z0-9_-]*/)) {
+    name = substr(line, RSTART, RLENGTH); sub(/^function[ \t]+/, "", name)
+  } else { name = "" }
+  if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function/sub defined in this script\n", TOOL, name }
+}
+AWKEOF
+}
+
+_static_analyze() {  # $1=tool $2=path $3=kind -> N/F/S rows on stdout
+  local tool="$1" path="$2" kind="$3"
+  case "$kind" in
+    sh)         awk -v TOOL="$tool" "$(_analyze_sh_awk)" "$path" 2>/dev/null ;;
+    python)     awk -v TOOL="$tool" "$(_analyze_python_awk)" "$path" 2>/dev/null ;;
+    make)       awk -v TOOL="$tool" "$(_analyze_make_awk)" "$path" 2>/dev/null ;;
+    ruby|perl|powershell)
+                awk -v TOOL="$tool" -v KIND="$kind" "$(_analyze_misc_awk)" "$path" 2>/dev/null ;;
+    text)       _parse_flags "$tool" "" < "$path" 2>/dev/null ;;
+    *) : ;;
+  esac
+}
+
+# best-effort one-line summary straight from the source when --help gave
+# nothing to work with: a Python module docstring, or the first real
+# top-of-file comment (after any shebang) for everything else.
+_static_summary() {  # $1=path $2=kind
+  local path="$1" kind="$2"
+  case "$kind" in
+    python)
+      awk '
+        NR <= 60 {
+          if (!started) { if ($0 ~ /^"""/) { started = 1; rest = $0; sub(/^"""/, "", rest); sub(/"""[ \t]*$/, "", rest); if (rest != "") { print rest; exit } }; next }
+          line = $0; gsub(/^[ \t]+|[ \t]+$/, "", line)
+          if (line != "") { print line; exit }
+        }
+      ' "$path" 2>/dev/null ;;
+    sh|ruby|perl|make)
+      awk '
+        NR == 1 && /^#!/ { next }
+        /^[ \t]*#/ { line = $0; sub(/^[ \t]*#[ \t]*/, "", line); if (line != "") { print line; exit }; next }
+        /^[ \t]*$/ { next }
+        { exit }
+      ' "$path" 2>/dev/null ;;
+  esac
+}
+
 # a stable, filesystem-safe cache key for a resolved binary -- basename plus
 # a short checksum (cksum, POSIX, no new dependency) of the full path, so two
 # different binaries sharing a basename (a project-local ./nmap wrapper vs
@@ -462,21 +708,78 @@ _ensure_cache_generic() {  # $1=file $2=mtime $3=writer-fn [writer-args...]
   printf '%s' "$f"
 }
 
+# drop a static-analysis F row when ANY of its comma-joined alias names is
+# already covered by a help-derived F row -- help wins on description/value
+# quality when both sources found the same flag, static analysis only adds
+# what help DIDN'T already say. N/S rows from static analysis pass through
+# untouched; there's nothing in a --help parse to collide with there.
+_merge_static_rows() {  # $1=help-derived rows $2=static rows
+  awk -F'|' '
+    NR == FNR { if ($1 == "F") { n = split($4, a, ","); for (i = 1; i <= n; i++) seen[a[i]] = 1 }; print; next }
+    $1 == "F" { n = split($4, a, ","); dup = 0; for (i = 1; i <= n; i++) if (a[i] in seen) dup = 1; if (dup) next }
+    { print }
+  ' <(printf '%s\n' "$1") <(printf '%s\n' "$2")
+}
+
+# a getopts-style script with no --help/-h case of its own doesn't print
+# nothing when probed with --help -- it prints ITS OWN ARGUMENT-PARSING
+# ERROR ("wraptool: illegal option -- -"), because --help just looks like
+# an unrecognized flag to it. That's real output, not empty, so it would
+# otherwise win as the tool's one-line summary over a much better one
+# static analysis can read straight from the script's own header comment.
+_looks_like_help_error() {
+  case "$1" in
+    *"illegal option"*|*"invalid option"*|*"unrecognized option"*|*"unknown option"*|*"option requires an argument"*|*": command not found"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _write_top_cache_body() {  # $1=tool
   local tool="$1"
   if _no_probe "$tool"; then
     printf 'T|%s|(SENSEI_NO_PROBE excludes this tool from auto-discovery)\n' "$tool"
-  else
-    local help; help="$(_probe_help "$tool")"
-    if [ -n "$help" ]; then
-      local summary; summary="$(printf '%s\n' "$help" | awk 'NF{print; exit}' | cut -c1-100 | tr '|' '/')"
-      printf 'T|%s|%s\n' "$tool" "${summary:-$tool}"
-      printf '%s\n' "$help" | _parse_flags "$tool" ""
+    return
+  fi
+
+  # --help/-h is ONE source, not the foundation: it's the only source that
+  # runs the tool at all (bounded, stdin closed, no other args -- see
+  # _run_probe/_probe_help), and plenty of real pentest tooling either
+  # doesn't support it or barely says anything useful through it. Static
+  # analysis of the resolved binary's own text is a second, independent,
+  # NEVER-executes source that works whether or not --help does -- see the
+  # STATIC ANALYSIS section above. Both get gathered and merged below,
+  # rather than static analysis only ever being a fallback for when help
+  # comes back empty.
+  local bin kind=""
+  bin="$(command -v "$tool" 2>/dev/null)"
+  [ -n "$bin" ] && [ -f "$bin" ] && [ -r "$bin" ] && kind="$(_script_kind "$bin")"
+
+  local help; help="$(_probe_help "$tool")"
+
+  local static=""
+  case "$kind" in
+    sh|python|ruby|perl|powershell|make|text) static="$(_static_analyze "$tool" "$bin" "$kind")" ;;
+  esac
+
+  local summary=""
+  if [ -n "$help" ] && ! _looks_like_help_error "$help"; then
+    summary="$(printf '%s\n' "$help" | awk 'NF{print; exit}' | cut -c1-100 | tr '|' '/')"
+  fi
+  [ -z "$summary" ] && [ -n "$kind" ] && summary="$(_static_summary "$bin" "$kind" | cut -c1-100 | tr '|' '/')"
+  printf 'T|%s|%s\n' "$tool" "${summary:-$tool}"
+
+  local helprows=""
+  if [ -n "$help" ]; then
+    helprows="$(printf '%s\n' "$help" | _parse_flags "$tool" ""
       printf '%s\n' "$help" | _parse_subs | awk -F'\t' -v t="$tool" '
-        { n=$1; d=$2; gsub(/\|/,"/",n); gsub(/\|/,"/",d); gsub(/\t/," ",d); print "S|" t "|" n "|" d }'
-    else
-      printf 'T|%s|%s\n' "$tool" "$tool"
-    fi
+        { n=$1; d=$2; gsub(/\|/,"/",n); gsub(/\|/,"/",d); gsub(/\t/," ",d); print "S|" t "|" n "|" d }')"
+  fi
+  if [ -n "$helprows" ] && [ -n "$static" ]; then
+    _merge_static_rows "$helprows" "$static"
+  elif [ -n "$helprows" ]; then
+    printf '%s\n' "$helprows"
+  elif [ -n "$static" ]; then
+    printf '%s\n' "$static"
   fi
 }
 
@@ -552,14 +855,77 @@ _spec_flag_value() {  # $1=tool $2=sub $3=flag -> "value<TAB>enum" if $3 is a kn
   _spec_blob_for "$1" "$2" | awk -F'|' -v f="$3" '
     $1=="F" { n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == f) { print $5"\t"$7; exit } }'
 }
+# static-analysis-derived functions/variables/targets -- see the STATIC
+# ANALYSIS section. Shaped identically to _spec_flags_expanded's 4 tab
+# fields (value always "-", enum always empty) so callers can concatenate
+# the two and feed both through the exact same prefix/keyword matching and
+# the exact same flags table, with no separate code path to keep in sync.
+_spec_named() {  # $1=tool $2=sub(may be empty) -> "name<TAB>-<TAB>desc (kind)<TAB>"
+  _spec_blob_for "$1" "$2" | awk -F'|' '$1=="N"{printf "%s\t-\t%s (%s)\t\n", $4, $5, $3}'
+}
 
-cmd_discover() {  # sensei discover <tool> [sub] -- force a fresh probe+parse
-  local tool="${1:?tool}" sub="${2:-}"
+# two shapes share this one entry point, disambiguated by whether the
+# second argument is an existing path (a subcommand name essentially never
+# is): `sensei discover <tool> [sub]` force-reprobes a cached tool via
+# --help as before; `sensei discover <keyword> <path>` inspects a file or
+# project DIRECTLY, by static analysis only, with no PATH lookup and no
+# --help involved at all -- for a script that isn't even executable yet,
+# isn't on $PATH, or that you just want to search without caching it.
+cmd_discover() {  # sensei discover <tool> [sub]  OR  sensei discover <keyword> <path>
+  local a1="${1:?usage: sensei discover <tool> [sub]   OR   sensei discover <keyword> <path>}" a2="${2:-}"
+  if [ -n "$a2" ] && [ -e "$a2" ]; then
+    cmd_discover_path "$a1" "$a2"
+    return
+  fi
+  local tool="$a1" sub="$a2"
   _spec_have_tool "$tool" || die "not found on PATH: $tool"
   rm -f "$SPEC_CACHE/$(_cache_key "$(command -v "$tool")")"*
   _ensure_top_cache "$tool" >/dev/null
   [ -n "$sub" ] && _ensure_sub_cache "$tool" "$sub" >/dev/null
   say "re-discovered $tool${sub:+ $sub}"
+}
+
+# static-analysis-only keyword search over a file or a shallow project
+# walk -- never touches $PATH, never runs anything, no cache written (this
+# is for an ad-hoc "does this thing have anything to do with X" look, not
+# the repeated per-keystroke lookups Tab-completion needs caching for).
+cmd_discover_path() {  # $1=keyword $2=file-or-dir
+  local kw="$1" path="$2"
+  local -a files=()
+  if [ -d "$path" ]; then
+    while IFS= read -r f; do files+=("$f"); done < <(
+      find "$path" -maxdepth 3 \
+        \( -name .git -o -name node_modules -o -name .venv -o -name venv \) -prune -o \
+        -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.py' -o -name '*.rb' \
+                   -o -name '*.pl' -o -name '*.pm' -o -name '*.ps1' -o -name '*.psm1' \
+                   -o -name 'Makefile' -o -name 'makefile' -o -name 'GNUmakefile' -o -name '*.mk' \
+                   -o -perm -u+x \) -print 2>/dev/null
+    )
+  elif [ -f "$path" ]; then
+    files=("$path")
+  else
+    die "not a file or directory: $path"
+  fi
+  [ "${#files[@]}" -gt 0 ] || { say "nothing inspectable found under $path"; return 0; }
+
+  local any=0 f kind rows hits
+  for f in "${files[@]}"; do
+    [ -r "$f" ] || continue
+    kind="$(_script_kind "$f")"
+    case "$kind" in sh|python|ruby|perl|powershell|make|text) : ;; *) continue ;; esac
+    rows="$(_static_analyze "${f##*/}" "$f" "$kind")"
+    [ -n "$rows" ] || continue
+    hits="$(printf '%s\n' "$rows" | awk -F'|' '
+      $1 == "F" { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i] "\t" $6 }
+      $1 == "N" { print $4 "\t" $5 " (" $3 ")" }
+    ' | _keyword_rank "$kw" 2 1)"
+    if [ -n "$hits" ]; then
+      any=1
+      printf '  %s:\n' "$f"
+      printf '%s\n' "$hits" | awk -F'\t' '{printf "    %-20s %s\n", $1, $2}'
+    fi
+  done
+  [ "$any" -eq 1 ] || say "nothing matching \"$kw\" found under $path"
 }
 
 cmd_tools() {  # sensei tools -- what sensei has already discovered
@@ -754,7 +1120,7 @@ cmd_args() {
   # _spec_flags_expanded rows are alias|value|desc|enum -- computed once
   # here and reused below both for glued-value detection and the flags
   # listing, instead of re-querying the same (tool, sub) pair twice.
-  local allflags; allflags=$(_spec_flags_expanded "$tool" "$sub")
+  local allflags; allflags=$(_spec_flags_expanded "$tool" "$sub"; _spec_named "$tool" "$sub")
 
   # last word is a KNOWN flag that takes a value -> that's the whole answer;
   # anything else on the line right now is a distraction, don't list it too
@@ -932,6 +1298,7 @@ cmd_complete() {
   local candidates rows
   rows="$({ [ -z "$sub" ] && _spec_subs "$tool"
             _spec_flags_expanded "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
+            _spec_named "$tool" "$sub" | awk -F'\t' '{print $1"\t"$3}'
           })"
   # Beyond the exact prefix match, also surface anything conceptually
   # related that isn't already in it -- an exact hit on --user-agent
@@ -1671,6 +2038,10 @@ cmd_help() {
     exact prefix match doesn't hide these: "--user" still shows
     --user-agent as the main hit plus --username/--create-user/
     --current-user under "also related to" right below it
+    no --help at all? sensei also reads the tool's own source (functions,
+    getopts/argparse-style flags, Makefile targets, ...) — never runs it —
+    so `tool proxy<Tab>` still works. `sensei discover <word> <path>`
+    runs the same search directly on a file/project, no PATH needed
 
   MODES & MISC
     S            toggle synchronize-panes (loud when armed — see README)
