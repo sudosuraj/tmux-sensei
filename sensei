@@ -256,7 +256,16 @@ function fold_value_into_enum(value, enumv,    v) {
   gsub(/\|/, "/", value)
   return value SUBSEP enumv
 }
-function emit(flags, value, desc, enumv,    folded) {
+# SRC/LOC let this SAME parser be reused on plain text that never came
+# from running --help at all (see _static_analyze's "text" kind, for a
+# file with no recognized shebang/extension -- some of those still embed
+# a usage/options block worth reading). Unset (the real --help path,
+# _write_top_cache_body/_write_sub_cache_body), source/location default to
+# "help"/"<tool> [sub] --help"; set, they say so honestly, and confidence
+# drops to "low" regardless of which tier matched -- a clean column split
+# says the LINE is well-formed, not that this file was ever meant to be
+# read as a help screen in the first place.
+function emit(flags, value, desc, enumv, conf,    folded, loc, src) {
   if (flags == "") return
   folded = fold_value_into_enum(value, enumv)
   value = substr(folded, 1, index(folded, SUBSEP) - 1)
@@ -265,7 +274,12 @@ function emit(flags, value, desc, enumv,    folded) {
   gsub(/\|/, "/", desc); gsub(/\t/, " ", desc)
   gsub(/^[ :.\-]+/, "", desc); gsub(/[ \t]+$/, "", desc)
   gsub(/\|/, ",", enumv); gsub(/\t/, " ", enumv)
-  printf "F|%s|%s|%s|%s|%s|%s\n", TOOL, SUB, flags, value, desc, enumv
+  if (LOC == "") {
+    src = "help"; loc = (SUB == "") ? (TOOL " --help") : (TOOL " " SUB " --help")
+  } else {
+    src = SRC; loc = LOC ":" FNR; conf = "low"
+  }
+  printf "F|%s|%s|%s|%s|%s|%s|%s|%s|%s\n", TOOL, SUB, flags, value, desc, enumv, src, loc, conf
 }
 {
   line = $0
@@ -302,7 +316,10 @@ function emit(flags, value, desc, enumv,    folded) {
     } else { ok = 0; break }
   }
 
-  if (n >= 2 && ok && flags != "") { emit(flags, value, desc, extract_enum(desc)); next }
+  # trusted column gap between flag cluster and description -- clean split,
+  # high confidence -- vs. tier 2 below, which grabs just the leading flag
+  # token(s) with no reliable value/enum split, so it's a genuine step down.
+  if (n >= 2 && ok && flags != "") { emit(flags, value, desc, extract_enum(desc), "high"); next }
 
   if (match(trimmed, /^--?[A-Za-z0-9]([A-Za-z0-9\/-]*[A-Za-z0-9])?/)) {
     cluster = substr(trimmed, RSTART, RLENGTH)
@@ -367,7 +384,7 @@ function emit(flags, value, desc, enumv,    folded) {
     valinner = value; gsub(/^<|>$/, "", valinner)
     if (rest == valinner) rest = ""
     if (enumv == "") enumv = extract_enum(rest)
-    if (flags != "") emit(flags, value, rest, enumv)
+    if (flags != "") emit(flags, value, rest, enumv, "medium")
   }
 }
 AWKEOF
@@ -446,7 +463,7 @@ BEGIN { insection = 0 }
 AWKEOF
 }
 
-_parse_flags() { awk -v TOOL="$1" -v SUB="$2" "$(_flags_awk_src)"; }   # help text on stdin
+_parse_flags() { awk -v TOOL="$1" -v SUB="$2" -v SRC="${3:-}" -v LOC="${4:-}" "$(_flags_awk_src)"; }   # help text on stdin
 _parse_subs()  { awk "$(_subs_awk_src)"; }                              # help text on stdin
 
 # ── STATIC ANALYSIS — understanding a tool that has no usable --help ──────────
@@ -531,9 +548,31 @@ function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
 function is_keyword(w) {
   return w in KW
 }
+# every discovered item, whatever kind, carries the same trailing three
+# fields: WHERE this came from, WHERE in the source, and HOW reliable it
+# is -- see the STATIC ANALYSIS section's note on source/location/
+# confidence. A clear, unambiguous syntactic construct (getopts, a
+# function/alias definition, a plain assignment) is "high"; an INFERENCE
+# from shape or context alone (a case pattern that merely LOOKS like a
+# flag, an env var read that's never assigned so it's presumed external,
+# an invoked-command guess) is "medium" -- static analysis reading real
+# code, but reading between the lines rather than a declared fact.
+function emitf(armname, flags, value, desc, conf) {
+  printf "F|%s|%s|%s|%s|%s||static:sh|%s:%d|%s\n", TOOL, armname, flags, value, desc, FILENAME, FNR, conf
+}
+function emitn(kind, name, desc, conf, line) {
+  if (line == "") line = FNR
+  printf "N|%s|%s|%s|%s|static:sh|%s:%d|%s\n", TOOL, kind, name, desc, FILENAME, line, conf
+}
 BEGIN {
   split("if then else elif fi for while until do done case esac function select in local declare typeset readonly export unset return exit shift break continue eval exec trap set echo printf read cd pwd test true false source wait kill type command builtin times getopts alias unalias history jobs fg bg disown suspend ulimit umask hash help", kwlist, " ")
   for (i in kwlist) KW[kwlist[i]] = 1
+  # bash's OWN special/builtin variables -- not something a CALLER exports,
+  # so a script reading $OPTARG (getopts' own per-option value) or $RANDOM
+  # is not "this script expects an environment variable," the same
+  # distinction as excluding language keywords from the invokes-scan above.
+  split("OPTARG OPTIND REPLY IFS PATH HOME PWD OLDPWD SHELL USER LANG LC_ALL TERM RANDOM SECONDS LINENO BASHPID FUNCNAME BASH_SOURCE BASH_VERSION BASH_VERSINFO PPID UID EUID HOSTNAME HOSTTYPE OSTYPE MACHTYPE PS1 PS2 PS3 PS4 COLUMNS LINES", bvlist, " ")
+  for (i in bvlist) BASHVAR[bvlist[i]] = 1
 }
 NR == FNR {
   t = trim($0)
@@ -544,11 +583,14 @@ NR == FNR {
   while (match(rest, /\$\{?[A-Za-z_][A-Za-z0-9_]*/)) {
     tok = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
     gsub(/^\$\{?/, "", tok)
-    if (tok ~ /^[A-Z][A-Z0-9_]*$/) referenced[tok] = 1
+    if (tok ~ /^[A-Z][A-Z0-9_]*$/ && !(tok in BASHVAR)) {
+      referenced[tok] = 1
+      if (!(tok in refline)) refline[tok] = FNR
+    }
   }
   next
 }
-FNR == 1 { depth = 0; incase = 0 }
+FNR == 1 { depth = 0; incase = 0; curarm = "" }
 {
   t = trim($0)
   if (t == "" || t ~ /^#/) next
@@ -557,11 +599,11 @@ FNR == 1 { depth = 0; incase = 0 }
   if (match(t, /^(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*\(\)/)) {
     name = substr(t, RSTART, RLENGTH)
     sub(/^function[ \t]+/, "", name); sub(/\(\)$/, "", name)
-    if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name }
+    if (name != "" && !(name in seenfn)) { seenfn[name] = 1; emitn("func", name, "function defined in this script", "high") }
     isdecl = 1
   } else if (match(t, /^function[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
     name = substr(t, RSTART, RLENGTH); sub(/^function[ \t]+/, "", name)
-    if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name }
+    if (name != "" && !(name in seenfn)) { seenfn[name] = 1; emitn("func", name, "function defined in this script", "high") }
     isdecl = 1
   }
 
@@ -570,23 +612,43 @@ FNR == 1 { depth = 0; incase = 0 }
     rhs = t; sub(/^alias[ \t]+[A-Za-z_][A-Za-z0-9_.-]*=/, "", rhs)
     gsub(/^['"]|['"]$/, "", rhs)
     if (length(rhs) > 60) rhs = substr(rhs, 1, 60) "..."
-    if (name != "" && !(name in seenalias)) { seenalias[name] = 1; printf "N|%s|alias|%s|alias for: %s\n", TOOL, name, rhs }
+    if (name != "" && !(name in seenalias)) { seenalias[name] = 1; emitn("alias", name, "alias for: " rhs, "high") }
   }
 
   if (t ~ /^case[ \t].*[ \t]in$/) incase++
-  else if (t == "esac" || t ~ /^esac[ \t;]/) { if (incase > 0) incase-- }
+  else if (t == "esac" || t ~ /^esac[ \t;]/) { if (incase > 0) incase--; curarm = "" }
+  else if (t == ";;" || t ~ /^;;/) { curarm = "" }
   else if (incase > 0 && match(t, /^[-A-Za-z0-9_|]+\)[ \t]*$/)) {
     isdecl = 1
     patt = t; sub(/\)[ \t]*$/, "", patt)
     n = split(patt, toks, "|")
-    flags = ""
+    flags = ""; bareword = ""; allflags = 1
     for (i = 1; i <= n; i++) {
       tk = trim(toks[i])
-      if (tk ~ /^--?[A-Za-z][A-Za-z0-9_-]*$/) flags = (flags == "" ? tk : flags "," tk)
+      if (tk ~ /^--?[A-Za-z][A-Za-z0-9_-]*$/) { flags = (flags == "" ? tk : flags "," tk) }
+      else { allflags = 0; if (bareword == "" && tk ~ /^[A-Za-z][A-Za-z0-9_-]*$/) bareword = tk }
     }
-    if (flags != "" && !(flags in seenflag)) {
-      seenflag[flags] = 1
-      printf "F|%s||%s|-|option handled in this script's argument parser|\n", TOOL, flags
+    # a pattern where every alternative looks like a flag ("-v|--verbose)")
+    # is a manual per-flag argument-parsing branch, scoped to whatever
+    # subcommand arm (if any) it's textually inside; a pattern that's bare
+    # words instead ("scan|help)") is a SUBCOMMAND selector itself, not a
+    # flag -- it sets the scope for everything until the next ";;", rather
+    # than being emitted as a flag of its own.
+    if (allflags && flags != "") {
+      key = curarm "\t" flags
+      if (!(key in seenflag)) { seenflag[key] = 1; emitf(curarm, flags, "-", "option handled in this script's argument parser", "medium") }
+    } else if (bareword != "") {
+      curarm = bareword
+      # the arm name itself IS a subcommand this script dispatches on --
+      # without this, a script whose only content is subcommand-scoped
+      # (every flag nested inside one arm or another) would show nothing
+      # at the top level, since there'd be no unscoped flags AND no
+      # declared subcommands either -- see cmd_args's "no output at all"
+      # guard, which checks both.
+      if (!(bareword in seensub)) {
+        seensub[bareword] = 1
+        printf "S|%s|%s|subcommand handled in this script's argument parser\n", TOOL, bareword
+      }
     }
   }
 
@@ -598,10 +660,11 @@ FNR == 1 { depth = 0; incase = 0 }
       c = substr(qs, i, 1)
       if (c == ":") { i++; continue }
       key = "-" c
-      if (!(key in seenflag)) {
-        seenflag[key] = 1
-        if (substr(qs, i + 1, 1) == ":") printf "F|%s||%s|<value>|option parsed via getopts|\n", TOOL, key
-        else printf "F|%s||%s|-|option parsed via getopts|\n", TOOL, key
+      fullkey = curarm "\t" key
+      if (!(fullkey in seenflag)) {
+        seenflag[fullkey] = 1
+        if (substr(qs, i + 1, 1) == ":") emitf(curarm, key, "<value>", "option parsed via getopts", "high")
+        else emitf(curarm, key, "-", "option parsed via getopts", "high")
       }
       i += (substr(qs, i + 1, 1) == ":") ? 2 : 1
     }
@@ -609,7 +672,7 @@ FNR == 1 { depth = 0; incase = 0 }
 
   if (depth == 0 && incase == 0 && match(t, /^[A-Z][A-Z0-9_]*=/)) {
     name = t; sub(/=.*/, "", name)
-    if (!(name in seenvar)) { seenvar[name] = 1; printf "N|%s|var|%s|top-level variable set in this script\n", TOOL, name }
+    if (!(name in seenvar)) { seenvar[name] = 1; emitn("var", name, "top-level variable set in this script", "high") }
   }
 
   # a bare leading word on an otherwise plain statement line -- not a shell
@@ -626,7 +689,7 @@ FNR == 1 { depth = 0; incase = 0 }
     after = substr(t, RLENGTH + 1, 1)
     if (after != "=" && !is_keyword(cand) && !(cand in seencand)) {
       seencand[cand] = 1
-      printf "C|%s|%s\n", TOOL, cand
+      printf "C|%s|%s|%s:%d|static:sh\n", TOOL, cand, FILENAME, FNR
     }
   }
 
@@ -635,13 +698,19 @@ FNR == 1 { depth = 0; incase = 0 }
   if (depth < 0) depth = 0
 }
 END {
-  for (v in referenced) if (!(v in assigned)) printf "N|%s|env|%s|environment variable this script reads\n", TOOL, v
+  for (v in referenced) if (!(v in assigned)) emitn("env", v, "environment variable this script reads", "medium", refline[v])
 }
 AWKEOF
 }
 
 _analyze_python_awk() {
 cat <<'AWKEOF'
+function emitf(flags, value, desc, enumv, conf) {
+  printf "F|%s||%s|%s|%s|%s|static:python|%s:%d|%s\n", TOOL, flags, value, desc, enumv, FILENAME, FNR, conf
+}
+function emitn(kind, name, desc, conf) {
+  printf "N|%s|%s|%s|%s|static:python|%s:%d|%s\n", TOOL, kind, name, desc, FILENAME, FNR, conf
+}
 {
   line = $0
   if (match(line, /add_argument\(/) || match(line, /click\.option\(/)) {
@@ -658,26 +727,46 @@ cat <<'AWKEOF'
       sub(/^help[ \t]*=[ \t]*['"]/, "", seg); sub(/['"]$/, "", seg)
       desc = seg
     }
+    # choices=[...] is a real enum, exactly as reliable as --help's own
+    # {a,b,c} notation -- argparse enforces it at runtime, so a value NOT
+    # in this list would be a real error, same confidence tier as the
+    # literal flag name itself.
+    enumv = ""
+    if (match(line, /choices[ \t]*=[ \t]*[\[\(][^\]\)]*[\]\)]/)) {
+      seg = substr(line, RSTART, RLENGTH)
+      sub(/^choices[ \t]*=[ \t]*[\[\(]/, "", seg); sub(/[\]\)]$/, "", seg)
+      n = split(seg, parts, ",")
+      for (i = 1; i <= n; i++) {
+        v = parts[i]; gsub(/^[ \t]+|[ \t]+$/, "", v); gsub(/^['"]|['"]$/, "", v)
+        if (v != "") enumv = (enumv == "" ? v : enumv "," v)
+      }
+    }
     if (flags != "" && !(flags in seenflag)) {
       seenflag[flags] = 1
-      printf "F|%s||%s|-|%s|\n", TOOL, flags, (desc == "" ? "argument parsed by this script" : desc)
+      emitf(flags, (enumv == "" ? "-" : "<value>"), (desc == "" ? "argument parsed by this script" : desc), enumv, "high")
     }
   }
   if (match(line, /^def[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/)) {
     name = line; sub(/^def[ \t]+/, "", name); sub(/[ \t]*\(.*/, "", name)
     if (name != "" && substr(name, 1, 1) != "_" && !(name in seenfn)) {
-      seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name
+      seenfn[name] = 1; emitn("func", name, "function defined in this script", "high")
     }
   }
 
   # environment variables this script actually reads -- os.environ[...]/
-  # .get(...) and os.getenv(...) are the two conventional ways.
+  # .get(...) and os.getenv(...) are the two conventional ways. Unlike the
+  # shell side, this isn't a two-pass "referenced but never assigned"
+  # inference -- reading via one of these calls IS the declaration that
+  # it's an environment variable, so this is as reliable as it gets short
+  # of a real interpreter; still "medium" rather than "high" because
+  # nothing here confirms this line actually executes (e.g. dead code, or
+  # feature-flagged off) the way a literal argparse flag name would.
   if (match(line, /os\.environ\[['"][A-Za-z_][A-Za-z0-9_]*['"]\]/) ||
       match(line, /os\.environ\.get\(['"][A-Za-z_][A-Za-z0-9_]*['"]/) ||
       match(line, /os\.getenv\(['"][A-Za-z_][A-Za-z0-9_]*['"]/)) {
     name = substr(line, RSTART, RLENGTH)
     sub(/^[^'"]*['"]/, "", name); sub(/['"].*$/, "", name)
-    if (name != "" && !(name in seenenv)) { seenenv[name] = 1; printf "N|%s|env|%s|environment variable this script reads\n", TOOL, name }
+    if (name != "" && !(name in seenenv)) { seenenv[name] = 1; emitn("env", name, "environment variable this script reads", "medium") }
   }
 
   # another program this script shells out to -- subprocess.*(...) with a
@@ -688,13 +777,13 @@ cat <<'AWKEOF'
     rest = substr(line, RSTART + RLENGTH)
     if (match(rest, /['"][-A-Za-z0-9_.\/]+['"]/)) {
       cmd = substr(rest, RSTART + 1, RLENGTH - 2)
-      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s\n", TOOL, cmd }
+      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s|%s:%d|static:python\n", TOOL, cmd, FILENAME, FNR }
     }
   } else if (match(line, /os\.system\(['"]/)) {
     rest = line; sub(/^.*os\.system\(['"]/, "", rest)
     if (match(rest, /^[-A-Za-z0-9_.\/]+/)) {
       cmd = substr(rest, RSTART, RLENGTH)
-      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s\n", TOOL, cmd }
+      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s|%s:%d|static:python\n", TOOL, cmd, FILENAME, FNR }
     }
   }
 }
@@ -703,16 +792,19 @@ AWKEOF
 
 _analyze_make_awk() {
 cat <<'AWKEOF'
+function emitn(kind, name, desc) {
+  printf "N|%s|%s|%s|%s|static:make|%s:%d|high\n", TOOL, kind, name, desc, FILENAME, FNR
+}
 {
   line = $0
   if (line ~ /^\t/) next
   if (line ~ /^\./) next
   if (match(line, /^[A-Za-z0-9_.%\/-]+[ \t]*:([^=]|$)/)) {
     tgt = line; sub(/:.*/, "", tgt); gsub(/[ \t]+$/, "", tgt)
-    if (tgt != "" && !(tgt in seentgt)) { seentgt[tgt] = 1; printf "N|%s|target|%s|Makefile target\n", TOOL, tgt }
+    if (tgt != "" && !(tgt in seentgt)) { seentgt[tgt] = 1; emitn("target", tgt, "Makefile target") }
   } else if (match(line, /^[A-Za-z_][A-Za-z0-9_]*[ \t]*[:+?]?=/)) {
     v = line; sub(/[ \t]*[:+?]?=.*/, "", v)
-    if (v != "" && !(v in seenvar)) { seenvar[v] = 1; printf "N|%s|var|%s|Makefile variable\n", TOOL, v }
+    if (v != "" && !(v in seenvar)) { seenvar[v] = 1; emitn("var", v, "Makefile variable") }
   }
 }
 AWKEOF
@@ -735,7 +827,10 @@ cat <<'AWKEOF'
   } else if (KIND == "powershell" && match(line, /^function[ \t]+[A-Za-z_][A-Za-z0-9_-]*/)) {
     name = substr(line, RSTART, RLENGTH); sub(/^function[ \t]+/, "", name)
   } else { name = "" }
-  if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function/sub defined in this script\n", TOOL, name }
+  if (name != "" && !(name in seenfn)) {
+    seenfn[name] = 1
+    printf "N|%s|func|%s|function/sub defined in this script|static:%s|%s:%d|high\n", TOOL, name, KIND, FILENAME, FNR
+  }
 }
 AWKEOF
 }
@@ -749,14 +844,14 @@ AWKEOF
 # branch or plain statement just invoking a helper) simply won't resolve
 # and gets silently dropped, no different from --help parsing silently
 # finding nothing on a line it can't make sense of.
-_filter_invoked_candidates() {  # rows on stdin -> same rows, C -> verified N|invokes or dropped
-  local line tool name
+_filter_invoked_candidates() {  # rows on stdin ("C|tool|name|location|source") -> same rows, C -> verified N|invokes or dropped
+  local line tool name loc src
   while IFS= read -r line; do
     case "$line" in
       C\|*)
-        tool="${line#C|}"; tool="${tool%%|*}"
-        name="${line##*|}"
-        command -v "$name" >/dev/null 2>&1 && printf 'N|%s|invokes|%s|tool invoked by this script\n' "$tool" "$name"
+        IFS='|' read -r _ tool name loc src <<<"$line"
+        command -v "$name" >/dev/null 2>&1 &&
+          printf 'N|%s|invokes|%s|tool invoked by this script|%s|%s|medium\n' "$tool" "$name" "$src" "$loc"
         ;;
       *) printf '%s\n' "$line" ;;
     esac
@@ -771,7 +866,7 @@ _static_analyze() {  # $1=tool $2=path $3=kind -> N/F/S rows on stdout
     make)       awk -v TOOL="$tool" "$(_analyze_make_awk)" "$path" 2>/dev/null ;;
     ruby|perl|powershell)
                 awk -v TOOL="$tool" -v KIND="$kind" "$(_analyze_misc_awk)" "$path" 2>/dev/null ;;
-    text)       _parse_flags "$tool" "" < "$path" 2>/dev/null ;;
+    text)       _parse_flags "$tool" "" "static:text" "$path" < "$path" 2>/dev/null ;;
     *) : ;;
   esac
 }
@@ -910,6 +1005,15 @@ _write_sub_cache_body() {  # $1=tool $2=sub
     local help; help="$(_probe_help "$tool" "$sub")"
     [ -n "$help" ] && printf '%s\n' "$help" | _parse_flags "$tool" "$sub"
   fi
+  # "nothing found" is a valid, cacheable outcome (a tool with no working
+  # `<tool> <sub> --help` at all -- its static-analysis-derived, sub-
+  # scoped flags already live in the TOP cache instead, see
+  # _analyze_sh_awk's case-arm scoping), not a failure -- without this, the
+  # bare `[ -n "$help" ] && ...` above being false makes THIS function
+  # return 1, which _ensure_cache_generic's `{ ... } && mv` then reads as
+  # "the write failed," silently skipping the mv and leaving the cache
+  # file never created at all.
+  return 0
 }
 
 _ensure_top_cache() {  # $1=tool -> prints the cache FILE PATH
@@ -968,21 +1072,38 @@ _spec_is_sub() {      # $1=tool $2=word
 }
 _spec_tool_summary() { _spec_blob_for "$1" "" | awk -F'|' '$1=="T"{print $3; exit}'; }
 _spec_subs() { _spec_blob_for "$1" "" | awk -F'|' '$1=="S"{print $3"\t"$4}'; }
-_spec_flags_expanded() {  # $1=tool $2=sub(may be empty) -> "alias<TAB>value<TAB>desc<TAB>enum"
-  _spec_blob_for "$1" "$2" | awk -F'|' '
-    $1=="F" { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i]"\t"$5"\t"$6"\t"$7 }'
+# "alias<TAB>value<TAB>desc<TAB>enum<TAB>source<TAB>location<TAB>confidence"
+# -- every consumer that only needs the first 3-4 fields (the compact
+# table, prefix/keyword matching) keeps working untouched; the trailing
+# three are there for a caller that wants to show WHERE a specific
+# discovered item came from and how sure sensei is about it (see cmd_args'
+# single-flag detail view).
+# $3 (the row's own SUB field) must match what was actually asked for --
+# global (empty) or this exact subcommand -- never just "every F row in
+# the blob." --help-derived rows never needed this: a subcommand's flags
+# only ever enter the blob at all when _spec_blob_for merges in that ONE
+# subcommand's own cache file. Static analysis writes every scope it finds
+# into the SAME top-level cache file, tagging each row's scope as data
+# instead of as a separate file -- so without this filter, a flag only
+# ever valid under one arm of a script's own dispatch would leak into the
+# global suggestion list, and into every OTHER subcommand's list too.
+_spec_flags_expanded() {  # $1=tool $2=sub(may be empty)
+  _spec_blob_for "$1" "$2" | awk -F'|' -v want="$2" '
+    $1=="F" && ($3=="" || $3==want) { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i]"\t"$5"\t"$6"\t"$7"\t"$8"\t"$9"\t"$10 }'
 }
 _spec_flag_value() {  # $1=tool $2=sub $3=flag -> "value<TAB>enum" if $3 is a known value-taking flag
-  _spec_blob_for "$1" "$2" | awk -F'|' -v f="$3" '
-    $1=="F" { n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == f) { print $5"\t"$7; exit } }'
+  _spec_blob_for "$1" "$2" | awk -F'|' -v f="$3" -v want="$2" '
+    $1=="F" && ($3=="" || $3==want) { n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == f) { print $5"\t"$7; exit } }'
 }
-# static-analysis-derived functions/variables/targets -- see the STATIC
-# ANALYSIS section. Shaped identically to _spec_flags_expanded's 4 tab
-# fields (value always "-", enum always empty) so callers can concatenate
-# the two and feed both through the exact same prefix/keyword matching and
-# the exact same flags table, with no separate code path to keep in sync.
-_spec_named() {  # $1=tool $2=sub(may be empty) -> "name<TAB>-<TAB>desc (kind)<TAB>"
-  _spec_blob_for "$1" "$2" | awk -F'|' '$1=="N"{printf "%s\t-\t%s (%s)\t\n", $4, $5, $3}'
+# static-analysis-derived functions/variables/targets/aliases/env-refs/
+# invoked-tools -- see the STATIC ANALYSIS section. Shaped IDENTICALLY to
+# _spec_flags_expanded's 7 tab fields (value always "-", enum always
+# empty) so callers can concatenate the two and feed both through the
+# exact same prefix/keyword matching and the exact same flags table, with
+# no separate code path to keep in sync -- one unified row shape,
+# regardless of which underlying record kind (F or N) it came from.
+_spec_named() {  # $1=tool $2=sub(may be empty)
+  _spec_blob_for "$1" "$2" | awk -F'|' '$1=="N"{printf "%s\t-\t%s (%s)\t\t%s\t%s\t%s\n", $4, $5, $3, $6, $7, $8}'
 }
 
 # two shapes share this one entry point, disambiguated by whether the
@@ -1010,6 +1131,23 @@ cmd_discover() {  # sensei discover <tool> [sub]  OR  sensei discover <keyword> 
 # walk -- never touches $PATH, never runs anything, no cache written (this
 # is for an ad-hoc "does this thing have anything to do with X" look, not
 # the repeated per-keystroke lookups Tab-completion needs caching for).
+# converts raw F/N analyzer rows into the SAME unified 7-tab-field shape
+# _spec_flags_expanded/_spec_named produce for a cached, on-PATH tool --
+# any scope, since an ad-hoc "does this file have anything to do with X"
+# search has no "current subcommand" context to narrow by the way
+# cmd_args/cmd_complete do. This is the one place that duplicates that
+# field mapping (rather than sharing it outright with _spec_flags_expanded/
+# _spec_named, which DO need the scope-aware filter) -- but the ranking
+# itself does NOT get re-implemented here: see cmd_discover_path below,
+# which feeds this straight into _match_with_related, the exact same
+# matcher `sensei args` and real Tab-completion use.
+_static_rows_unified() {  # raw F/N rows on stdin
+  awk -F'|' '
+    $1=="F" { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i]"\t"$5"\t"$6"\t"$7"\t"$8"\t"$9"\t"$10 }
+    $1=="N" { printf "%s\t-\t%s (%s)\t\t%s\t%s\t%s\n", $4, $5, $3, $6, $7, $8 }
+  '
+}
+
 cmd_discover_path() {  # $1=keyword $2=file-or-dir
   local kw="$1" path="$2"
   local -a files=()
@@ -1029,21 +1167,35 @@ cmd_discover_path() {  # $1=keyword $2=file-or-dir
   fi
   [ "${#files[@]}" -gt 0 ] || { say "nothing inspectable found under $path"; return 0; }
 
-  local any=0 f kind rows hits
+  local any=0 f kind raw rows
   for f in "${files[@]}"; do
     [ -r "$f" ] || continue
     kind="$(_script_kind "$f")"
     case "$kind" in sh|python|ruby|perl|powershell|make|text) : ;; *) continue ;; esac
-    rows="$(_static_analyze "${f##*/}" "$f" "$kind")"
+    raw="$(_static_analyze "${f##*/}" "$f" "$kind")"
+    [ -n "$raw" ] || continue
+    rows="$(printf '%s\n' "$raw" | _static_rows_unified)"
     [ -n "$rows" ] || continue
-    hits="$(printf '%s\n' "$rows" | awk -F'|' '
-      $1 == "F" { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i] "\t" $6 }
-      $1 == "N" { print $4 "\t" $5 " (" $3 ")" }
-    ' | _keyword_rank "$kw" 2 1)"
-    if [ -n "$hits" ]; then
+    # same policy, same function, same output shape as cmd_args' flags
+    # section: exact match primary, conceptually-related supplement --
+    # NOT a separate ranking implementation for this entry point.
+    _match_with_related "$rows" "$kw" 3
+    if [ -n "$MWR_PRIMARY" ] || [ -n "$MWR_EXTRA" ]; then
       any=1
       printf '  %s:\n' "$f"
-      printf '%s\n' "$hits" | awk -F'\t' '{printf "    %-20s %s\n", $1, $2}'
+      if [ -n "$MWR_PRIMARY" ]; then
+        printf '%s\n' "$MWR_PRIMARY" | awk -F'\t' '{
+          v = ($2 == "-") ? "" : $2
+          printf "    %-20s %-14s %s\n", $1, v, $3
+        }'
+      fi
+      if [ -n "$MWR_EXTRA" ]; then
+        printf '    also related to "%s":\n' "$kw"
+        printf '%s\n' "$MWR_EXTRA" | awk -F'\t' '{
+          v = ($2 == "-") ? "" : $2
+          printf "      %-18s %-14s %s\n", $1, v, $3
+        }'
+      fi
     fi
   done
   [ "$any" -eq 1 ] || say "nothing matching \"$kw\" found under $path"
@@ -1213,7 +1365,7 @@ cmd_args() {
 
   _spec_have_tool "$tool" || die "not found on PATH: $tool"
 
-  if [ -z "$(_spec_flags_expanded "$tool" "")" ] && [ -z "$(_spec_subs "$tool")" ]; then
+  if [ -z "$(_spec_flags_expanded "$tool" "")" ] && [ -z "$(_spec_subs "$tool")" ] && [ -z "$(_spec_named "$tool" "")" ]; then
     local summary; summary="$(_spec_tool_summary "$tool")"
     if [ "$summary" = "$tool" ]; then
       # _ensure_top_cache's own sentinel for "genuinely no output at all" --
@@ -1251,6 +1403,10 @@ cmd_args() {
     vinfo=$(_spec_flag_value "$tool" "$sub" "$last")
     if [ -n "$vinfo" ]; then
       local val="${vinfo%%$'\t'*}" enum="${vinfo#*$'\t'}"
+      # the ONE row matching what you just typed -- exact match, so this is
+      # the detailed single-item view: worth showing WHERE this came from
+      # and how sure sensei is, not just clutter for the compact list below.
+      local meta; meta=$(printf '%s\n' "$allflags" | awk -F'\t' -v f="$last" '$1==f{print $5"\t"$6"\t"$7; exit}')
       if [ "$val" != "-" ]; then
         awaiting_value=1
         printf '  \xe2\x80\xba %s expects %s\n' "$last" "$val"
@@ -1264,6 +1420,9 @@ cmd_args() {
         local own; own=$(printf '%s\n' "$allflags" | awk -F'\t' -v f="$last" '$1==f{print $3; exit}')
         [ -n "$own" ] && printf '  \xe2\x80\xba %s: %s\n' "$last" "$own"
       fi
+      if [ -n "$meta" ]; then
+        printf '%s\n' "$meta" | awk -F'\t' '$1!=""{printf "    source: %s   location: %s   confidence: %s\n", $1, $2, $3}'
+      fi
     else
       # not a flag on its own -- but the value might be glued directly onto
       # it with no space, nmap-style ("-T4" for "-T <0-5>"): find the known
@@ -1271,12 +1430,12 @@ cmd_args() {
       local glued; glued=$(printf '%s\n' "$allflags" | awk -F'\t' -v last="$last" '
         $2 != "-" && length($1) < length(last) && index(last, $1) == 1 { print; exit }')
       if [ -n "$glued" ]; then
-        local galias="${glued%%$'\t'*}" grest="${glued#*$'\t'}"
-        local gval="${grest%%$'\t'*}" grest2="${grest#*$'\t'}"
-        local genum="${grest2#*$'\t'}"
+        local galias gval gdesc genum gsrc gloc gconf
+        IFS=$'\t' read -r galias gval gdesc genum gsrc gloc gconf <<<"$glued"
         awaiting_value=1
         printf '  \xe2\x80\xba %s expects %s (glued onto %s, no space)\n' "$last" "$gval" "$galias"
         [ -n "$genum" ] && printf '    one of: %s\n' "${genum//,/, }"
+        [ -n "$gsrc" ] && printf '    source: %s   location: %s   confidence: %s\n' "$gsrc" "$gloc" "$gconf"
       else
         # anything you typed that ISN'T the subcommand you just picked is
         # something to narrow by -- with or without a leading dash. You don't
