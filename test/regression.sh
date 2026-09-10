@@ -33,12 +33,10 @@ assert_not_contains() {  # $1=label $2=haystack $3=needle-that-must-be-absent
 }
 
 # ── fixture: nested case dispatch (scan/report), custom parsing, no --help ──
-# NOTE: each arm's pattern is deliberately alone on its own line (the
-# multi-line `pattern)\n  body\n  ;;` style) -- that's the shape the
-# analyzer's case-pattern detection currently recognizes. A single-line
-# arm ("pattern) body ;;" all on one line) is a KNOWN, separate, not-yet-
-# fixed gap (see the failure inventory), not something this suite claims
-# to cover.
+# The multi-line `pattern)\n  body\n  ;;` style; section 9 below covers the
+# single-line `pattern) body ;;` style with its own fixture, and section 9b
+# covers the two mixed in the same script (a nested per-flag case using
+# one style, the outer dispatch using the other).
 cat > "$WORK/bin/reconwrap" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -140,12 +138,73 @@ if __name__ == '__main__':
 EOF
 chmod +x "$WORK/bin/crashtool"
 
+# ── fixture: single-line case arms ("pattern) body ;;" all on one line) ────
+cat > "$WORK/bin/singlelinetool" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  --verify) echo "verifying" ;;
+  --cert-path) CERT="$2"; shift 2 ;;
+esac
+EOF
+chmod +x "$WORK/bin/singlelinetool"
+
+# ── fixture: single-line AND multi-line arms mixed, with nested scoping ────
+cat > "$WORK/bin/mixedstyletool" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  scan)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --target-domain) TARGET_DOMAIN="$2"; shift 2 ;;
+        --verify) echo "verifying" ;;
+        *) shift ;;
+      esac
+    done
+    ;;
+  report)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --output)
+          OUT="$2"
+          shift 2
+          ;;
+        *) shift ;;
+      esac
+    done
+    ;;
+esac
+EOF
+chmod +x "$WORK/bin/mixedstyletool"
+
+# ── fixture: argparse value-taking/metadata, interpreter deliberately
+# missing (python3-notreal) so --help can never run and every result below
+# is forced through static analysis alone -- a real interpreter would also
+# answer these correctly via its own --help text, which would test tier-2
+# help parsing instead of the static analyzer this fixture exists to cover.
+cat > "$WORK/bin/pyvaluetool" <<'EOF'
+#!/usr/bin/env python3-notreal
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--target")
+parser.add_argument("--verbose", action="store_true")
+parser.add_argument(
+    "--output",
+    choices=["json", "csv", "xml"]
+)
+parser.add_argument("--retries", type=int, default=3)
+parser.add_argument("--tag", metavar="TAG")
+parser.add_argument("--files", nargs="+")
+EOF
+chmod +x "$WORK/bin/pyvaluetool"
+
 rm -rf "$SENSEI_SPEC_CACHE"
 
 printf '\n1. Nested bash case scoping does not leak\n'
 scan_out="$("$SENSEI" args reconwrap scan 2>&1)"
 report_out="$("$SENSEI" args reconwrap report 2>&1)"
-assert_contains    "scan shows --target-domain"            "$scan_out"   -- '--target-domain'
+assert_contains    "scan shows --target-domain"            "$scan_out"   '--target-domain'
 assert_contains    "scan shows --disable-ssl-verification" "$scan_out"   '--disable-ssl-verification'
 assert_contains    "scan shows --output"                   "$scan_out"   '--output'
 assert_not_contains "report does NOT show --disable-ssl-verification (the original leak)" "$report_out" '--disable-ssl-verification'
@@ -206,6 +265,61 @@ assert_contains "exact-prefix -s<Tab> still finds -sC" "$prefix_out" '-sC'
 printf '\n8. sensei args, Tab-completion, and sensei discover share one matcher\n'
 discover_out="$("$SENSEI" discover output "$WORK/bin/argparsetool.py" 2>&1)"
 assert_contains "sensei discover finds the same --output enum sensei args does" "$discover_out" '--output'
+
+printf '\n9. Single-line case arms ("pattern) body ;;" all on one line)\n'
+sl_out="$("$SENSEI" args singlelinetool 2>&1)"
+assert_contains "single-line --verify is found" "$sl_out" '--verify'
+if printf '%s\n' "$sl_out" | grep -qE '^\s*--cert-path\s+<value>'; then
+  ok "single-line --cert-path is detected as value-taking"
+else
+  bad "single-line --cert-path not shown as value-taking"; printf '%s\n' "$sl_out" | sed 's/^/      | /'
+fi
+assert_contains "single-line --cert-path description mentions CERT (the assigned variable)" "$sl_out" 'CERT'
+
+printf '\n9b. Single-line and multi-line arms mixed, with nested scoping\n'
+ms_scan="$("$SENSEI" args mixedstyletool scan 2>&1)"
+ms_report="$("$SENSEI" args mixedstyletool report 2>&1)"
+assert_contains     "mixed: scan (single-line arms) shows --target-domain" "$ms_scan"   '--target-domain'
+assert_contains     "mixed: scan (single-line arms) shows --verify"        "$ms_scan"   '--verify'
+assert_not_contains "mixed: scan does NOT show --output (report-only, multi-line)" "$ms_scan" '--output'
+assert_contains     "mixed: report (multi-line arm) shows --output"        "$ms_report" '--output'
+assert_not_contains "mixed: report does NOT show --target-domain (scan-only, single-line)" "$ms_report" '--target-domain'
+
+printf '\n10. Python argparse value-taking + structured metadata (no --help available)\n'
+pv_out="$("$SENSEI" args pyvaluetool 2>&1)"
+if printf '%s\n' "$pv_out" | grep -qE '^\s*--target\s+<value>'; then
+  ok "plain add_argument(\"--target\") infers value-taking"
+else
+  bad "plain --target not shown as value-taking"; printf '%s\n' "$pv_out" | sed 's/^/      | /'
+fi
+if printf '%s\n' "$pv_out" | grep -qE '^\s*--verbose\s+<'; then
+  bad "action=\"store_true\" --verbose wrongly shown as value-taking"; printf '%s\n' "$pv_out" | sed 's/^/      | /'
+else
+  ok "action=\"store_true\" --verbose is boolean, not value-taking"
+fi
+assert_contains "--retries shows its type=int as structured <int>" "$pv_out" '--retries'
+if printf '%s\n' "$pv_out" | grep -qE '^\s*--retries\s+<int>'; then
+  ok "--retries value is the structured <int>, not a bare <value>"
+else
+  bad "--retries missing structured <int>"; printf '%s\n' "$pv_out" | sed 's/^/      | /'
+fi
+assert_contains "--retries description mentions its default" "$pv_out" 'default: 3'
+if printf '%s\n' "$pv_out" | grep -qE '^\s*--tag\s+<TAG>'; then
+  ok "--tag uses its metavar=TAG as the structured value"
+else
+  bad "--tag missing structured <TAG> metavar"; printf '%s\n' "$pv_out" | sed 's/^/      | /'
+fi
+if printf '%s\n' "$pv_out" | grep -qE '^\s*--files\s+<value>\.\.\.'; then
+  ok "--files nargs=\"+\" shows the repeatable ... suffix"
+else
+  bad "--files missing nargs repeatable suffix"; printf '%s\n' "$pv_out" | sed 's/^/      | /'
+fi
+pv_output_detail="$("$SENSEI" args pyvaluetool --output 2>&1)"
+assert_contains "--output choices=[...] surfaces as a real enum, not just in the description" "$pv_output_detail" 'json, csv, xml'
+pv_complete="$("$SENSEI" complete 2 pyvaluetool --output "" 2>&1)"
+assert_contains "Tab-completion after --output offers json from the structured enum" "$pv_complete" 'json'
+assert_contains "Tab-completion after --output offers csv from the structured enum" "$pv_complete" 'csv'
+assert_contains "Tab-completion after --output offers xml from the structured enum" "$pv_complete" 'xml'
 
 echo
 if [ "$fail" -eq 0 ]; then

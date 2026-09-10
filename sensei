@@ -645,77 +645,129 @@ FNR == 1 { depth = 0; casedepth = 0; curarm = ""; pend_active = 0; pendletter = 
     finalize_pending()
     if (casedepth > 0) casedepth--
     curarm = casestack[casedepth]
-  } else if (t == ";;" || t ~ /^;;/) {
-    finalize_pending()
-  } else if (casedepth > 0 && match(t, /^[A-Za-z]\)[ \t]*$/)) {
-    # a single bare letter alone on its own line, inside SOME case -- the
-    # shape of a getopts companion arm ("case "$opt" in t) ... ;; esac").
-    # Not scored as high-confidence on its own (plenty of single-letter
-    # case arms have nothing to do with getopts), so it only ever enriches
-    # a getopts flag already found via the real optstring, never invents
-    # a flag by itself.
-    finalize_pending()
-    isdecl = 1
-    pendletter = substr(t, 1, 1)
-  } else if (casedepth > 0 && match(t, /^[-A-Za-z0-9_|]+\)[ \t]*$/)) {
-    finalize_pending()
-    isdecl = 1
-    patt = t; sub(/\)[ \t]*$/, "", patt)
-    n = split(patt, toks, "|")
-    flags = ""; bareword = ""; allflags = 1
-    for (i = 1; i <= n; i++) {
-      tk = trim(toks[i])
-      if (tk ~ /^--?[A-Za-z][A-Za-z0-9_-]*$/) { flags = (flags == "" ? tk : flags "," tk) }
-      else { allflags = 0; if (bareword == "" && tk ~ /^[A-Za-z][A-Za-z0-9_-]*$/) bareword = tk }
-    }
-    # a pattern where every alternative looks like a flag ("-v|--verbose)")
-    # is a manual per-flag argument-parsing branch, scoped to whatever
-    # subcommand arm (if any) it's textually inside; a pattern that's bare
-    # words instead ("scan|help)") is a SUBCOMMAND selector itself, not a
-    # flag -- it sets the scope for everything until the matching `esac`
-    # (inherited correctly through any case nested inside it), rather
-    # than being emitted as a flag of its own.
-    if (allflags && flags != "") {
-      key = curarm "\t" flags
-      if (!(key in seenflag)) {
-        seenflag[key] = 1
-        pend_active = 1; pend_scope = curarm; pend_flags = flags; pend_line = FNR
+  } else if (casedepth > 0) {
+    # A case arm is "PATTERN) BODY ;;" -- three tokens with no requirement
+    # they land on separate lines. Rather than a second, whole-line-only
+    # regex bolted on for the single-line style, this walks ONE line as a
+    # sequence of those same three token kinds, in whatever order they
+    # actually appear: pattern-then-`)`, a `;;` terminator, or a chunk of
+    # body text in between -- so "--verify) echo ... ;;" and a pattern
+    # alone on its own line are the SAME state transitions, just spread
+    # across a different number of lines. Every transition (a new
+    # pattern, or `;;`) finalizes whatever was pending first, exactly as
+    # the multi-line path already did.
+    rest = t
+    while (rest != "") {
+      if (match(rest, /^[-A-Za-z0-9_|]+\)/)) {
+        finalize_pending()
+        isdecl = 1
+        patt = substr(rest, 1, RLENGTH - 1)
+        rest = substr(rest, RLENGTH + 1)
+        gsub(/^[ \t]+/, "", rest)
+        if (patt ~ /^[A-Za-z]$/) {
+          # a single bare letter -- the shape of a getopts companion arm
+          # ("case "$opt" in t) ... ;; esac"). Not scored as confident on
+          # its own (plenty of single-letter arms have nothing to do with
+          # getopts), so it only ever enriches a getopts flag already
+          # found via the real optstring, never invents a flag by itself.
+          pendletter = patt
+        } else {
+          n = split(patt, toks, "|")
+          flags = ""; bareword = ""; allflags = 1
+          for (i = 1; i <= n; i++) {
+            tk = trim(toks[i])
+            if (tk ~ /^--?[A-Za-z][A-Za-z0-9_-]*$/) { flags = (flags == "" ? tk : flags "," tk) }
+            else { allflags = 0; if (bareword == "" && tk ~ /^[A-Za-z][A-Za-z0-9_-]*$/) bareword = tk }
+          }
+          # a pattern where every alternative looks like a flag
+          # ("-v|--verbose)") is a manual per-flag argument-parsing
+          # branch, scoped to whatever subcommand arm (if any) it's
+          # textually inside; a pattern that's bare words instead
+          # ("scan|help)") is a SUBCOMMAND selector itself, not a flag --
+          # it sets the scope for everything until the matching `esac`
+          # (inherited correctly through any case nested inside it),
+          # rather than being emitted as a flag of its own.
+          if (allflags && flags != "") {
+            key = curarm "\t" flags
+            if (!(key in seenflag)) {
+              seenflag[key] = 1
+              pend_active = 1; pend_scope = curarm; pend_flags = flags; pend_line = FNR
+            }
+          } else if (bareword != "") {
+            curarm = bareword
+            # the arm name itself IS a subcommand this script dispatches
+            # on -- without this, a script whose only content is
+            # subcommand-scoped (every flag nested inside one arm or
+            # another) would show nothing at the top level, since
+            # there'd be no unscoped flags AND no declared subcommands
+            # either -- see cmd_args's "no output at all" guard, which
+            # checks both.
+            if (!(bareword in seensub)) {
+              seensub[bareword] = 1
+              printf "S|%s|%s|subcommand handled in this script's argument parser\n", TOOL, bareword
+            }
+          }
+        }
+        continue
       }
-    } else if (bareword != "") {
-      curarm = bareword
-      # the arm name itself IS a subcommand this script dispatches on --
-      # without this, a script whose only content is subcommand-scoped
-      # (every flag nested inside one arm or another) would show nothing
-      # at the top level, since there'd be no unscoped flags AND no
-      # declared subcommands either -- see cmd_args's "no output at all"
-      # guard, which checks both.
-      if (!(bareword in seensub)) {
-        seensub[bareword] = 1
-        printf "S|%s|%s|subcommand handled in this script's argument parser\n", TOOL, bareword
+      if (match(rest, /^;;/)) {
+        finalize_pending()
+        rest = substr(rest, RLENGTH + 1)
+        gsub(/^[ \t]+/, "", rest)
+        continue
       }
-    }
-  }
+      # body text: everything up to the NEXT ;; (or the rest of the line,
+      # if this arm's terminator isn't on this line at all) -- a fresh
+      # pattern can only legally start once a ;; has closed the current
+      # arm, so stopping at the next ;; is enough to isolate exactly this
+      # arm's visible body on this line without parsing real shell syntax.
+      if (match(rest, /;;/)) { bodychunk = substr(rest, 1, RSTART - 1); rest = substr(rest, RSTART) }
+      else { bodychunk = rest; rest = "" }
 
-  # evidence a PENDING flag actually consumes a following argument: a
-  # `shift 2` (one shift for the flag, one for its value) is the standard
-  # bash idiom; an assignment reading $2/${2} straight out of the arm body
-  # is even more direct, and the variable it lands in is real, searchable
-  # signal ("TARGET_DOMAIN" for --target-domain) that the bare pattern
-  # text alone could never provide.
-  if (pend_active) {
-    if (match(t, /shift[ \t]+2\b/)) pend_hasvalue = 1
-    if (match(t, /^[A-Za-z_][A-Za-z0-9_]*=[ \t]*"?\$\{?2\}?"?/)) {
-      pend_hasvalue = 1
-      if (pend_varname == "") { vn = t; sub(/=.*/, "", vn); pend_varname = vn }
+      # evidence a PENDING flag actually consumes a following argument: a
+      # `shift 2` (one shift for the flag, one for its value) is the
+      # standard bash idiom; an assignment reading $2/${2} straight out
+      # of the body is even more direct, and the variable it lands in is
+      # real, searchable signal ("TARGET_DOMAIN" for --target-domain)
+      # the bare pattern text alone could never provide.
+      if (pend_active) {
+        if (match(bodychunk, /shift[ \t]+2\b/)) pend_hasvalue = 1
+        if (match(bodychunk, /[A-Za-z_][A-Za-z0-9_]*=[ \t]*"?\$\{?2\}?"?/)) {
+          pend_hasvalue = 1
+          if (pend_varname == "") {
+            seg = substr(bodychunk, RSTART, RLENGTH); sub(/=.*/, "", seg); gsub(/^[ \t;]+/, "", seg)
+            pend_varname = seg
+          }
+        }
+      }
+      # same idea for a getopts companion arm: `t) TARGET="$OPTARG" ;;` --
+      # getopts' own optstring already says definitively whether -t takes
+      # a value (a trailing ":"), so this only ever ADDS the variable
+      # name to an already-known flag, never invents value-taking-ness.
+      if (pendletter != "" && match(bodychunk, /[A-Za-z_][A-Za-z0-9_]*=[ \t]*"?\$\{?OPTARG\}?"?/)) {
+        seg = substr(bodychunk, RSTART, RLENGTH); sub(/=.*/, "", seg); gsub(/^[ \t;]+/, "", seg)
+        optvarname[curarm "\t-" pendletter] = seg
+      }
+      # a single-line arm's body can invoke another program too
+      # ("scan) nmap -sC -sV ;;") -- the OUTER, whole-line invocation
+      # scan below never sees this (isdecl is set the moment a pattern
+      # is found earlier on this same line), so it's checked here
+      # instead, on the chunk, using the exact same rule (not a keyword,
+      # not itself being assigned, verified later via a real `command
+      # -v`). A plain body-only line with no pattern on it at all
+      # (isdecl still 0) is left to that outer scan, unchanged.
+      if (isdecl) {
+        bc = trim(bodychunk)
+        if (bc != "" && match(bc, /^[A-Za-z_][A-Za-z0-9_.\/-]*/)) {
+          cand = substr(bc, RSTART, RLENGTH)
+          aftr = substr(bc, RLENGTH + 1, 1)
+          if (aftr != "=" && !is_keyword(cand) && !(cand in seencand)) {
+            seencand[cand] = 1
+            printf "C|%s|%s|%s:%d|static:sh\n", TOOL, cand, FILENAME, FNR
+          }
+        }
+      }
     }
-  }
-  # same idea for a getopts companion arm: `t) TARGET="$OPTARG" ;;` --
-  # getopts' own optstring already says definitively whether -t takes a
-  # value (a trailing ":"), so this only ever ADDS the variable name to
-  # an already-known flag, never invents value-taking-ness by itself.
-  if (pendletter != "" && match(t, /^[A-Za-z_][A-Za-z0-9_]*=[ \t]*"?\$\{?OPTARG\}?"?/)) {
-    vn = t; sub(/=.*/, "", vn)
-    optvarname[curarm "\t-" pendletter] = vn
   }
 
   if (match(t, /getopts[ \t]+"[^"]*"/)) {
@@ -786,13 +838,29 @@ AWKEOF
 _analyze_python_awk() {
 cat <<'AWKEOF'
 function emitf(subscope, flags, value, desc, enumv, conf) {
-  printf "F|%s|%s|%s|%s|%s|%s|static:python|%s:%d|%s\n", TOOL, subscope, flags, value, desc, enumv, FILENAME, FNR, conf
+  printf "F|%s|%s|%s|%s|%s|%s|static:python|%s:%d|%s\n", TOOL, subscope, flags, value, desc, enumv, FILENAME, STMT_LINE, conf
 }
 function emitn(kind, name, desc, conf) {
-  printf "N|%s|%s|%s|%s|static:python|%s:%d|%s\n", TOOL, kind, name, desc, FILENAME, FNR, conf
+  printf "N|%s|%s|%s|%s|static:python|%s:%d|%s\n", TOOL, kind, name, desc, FILENAME, STMT_LINE, conf
 }
 {
-  line = $0
+  # add_argument(...)/add_parser(...)/click.option(...) calls routinely
+  # wrap across several physical lines (black/autopep8 do this by
+  # default for anything with more than one keyword argument, including
+  # the choices=[...] example this is built to handle) -- a per-PHYSICAL-
+  # line scan would see the flag name on one line and choices= on a
+  # completely different one and never connect them. Buffered here by
+  # tracking paren balance: keep appending lines until every "(" this
+  # statement opened has a matching ")", THEN treat the whole joined
+  # buffer as one logical line for every check below. A normal one-line
+  # statement balances immediately, so this changes nothing for the
+  # common case.
+  if (stmtbuf == "") stmtstart = FNR
+  stmtbuf = (stmtbuf == "" ? $0 : stmtbuf " " $0)
+  tmp = stmtbuf; opens = gsub(/\(/, "(", tmp)
+  tmp = stmtbuf; closes = gsub(/\)/, ")", tmp)
+  if (opens > closes) next
+  line = stmtbuf; stmtbuf = ""; STMT_LINE = stmtstart
 
   # subparsers: `scan = subparsers.add_parser("scan")` -- the ASSIGNMENT
   # target (here "scan") is what every later `scan.add_argument(...)`
@@ -852,10 +920,61 @@ function emitn(kind, name, desc, conf) {
         if (v != "") enumv = (enumv == "" ? v : enumv "," v)
       }
     }
+    # action= is argparse's OWN say on whether this consumes a value --
+    # store_true/store_false/store_const/count/help/version never do
+    # (this is argparse's real runtime behavior, not a guess); anything
+    # else, INCLUDING the unwritten default action ("store"), does. A
+    # click.option has no action= at all, so it falls through to the
+    # same "expects a value unless told otherwise" default -- correct
+    # for click too (is_flag=True is its equivalent of store_true, and
+    # that's covered by the same regex family below).
+    is_bool = 0
+    if (match(line, /action[ \t]*=[ \t]*['"](store_true|store_false|store_const|count|help|version)['"]/)) is_bool = 1
+    if (match(line, /is_flag[ \t]*=[ \t]*True/)) is_bool = 1
+    metavar = ""
+    if (match(line, /metavar[ \t]*=[ \t]*['"][^'"]*['"]/)) {
+      seg = substr(line, RSTART, RLENGTH); sub(/^metavar[ \t]*=[ \t]*['"]/, "", seg); sub(/['"]$/, "", seg)
+      metavar = seg
+    }
+    typ = ""
+    if (match(line, /type[ \t]*=[ \t]*[A-Za-z_][A-Za-z0-9_.]*/)) {
+      seg = substr(line, RSTART, RLENGTH); sub(/^type[ \t]*=[ \t]*/, "", seg)
+      typ = seg
+    }
+    nargs = ""
+    if (match(line, /nargs[ \t]*=[ \t]*['"]?[0-9+*?]+['"]?/)) {
+      seg = substr(line, RSTART, RLENGTH); sub(/^nargs[ \t]*=[ \t]*['"]?/, "", seg); gsub(/['"]$/, "", seg)
+      nargs = seg
+    }
+    # default= is real, useful information, but it doesn't drive
+    # completion the way value/enum do (nothing about Tab-completion or
+    # "does this take a value" changes based on it) -- so unlike those,
+    # it's surfaced in the description rather than earning its own
+    # structured field, the same tradeoff already made for a getopts
+    # flag's inferred variable name.
+    defaultv = ""
+    if (match(line, /default[ \t]*=[ \t]*['"][^'"]*['"]/)) {
+      seg = substr(line, RSTART, RLENGTH); sub(/^default[ \t]*=[ \t]*['"]/, "", seg); sub(/['"]$/, "", seg)
+      defaultv = seg
+    } else if (match(line, /default[ \t]*=[ \t]*[A-Za-z0-9_.]+/)) {
+      seg = substr(line, RSTART, RLENGTH); sub(/^default[ \t]*=[ \t]*/, "", seg)
+      if (seg != "None") defaultv = seg
+    }
+
+    if (is_bool) { val = "-" }
+    else if (enumv != "") { val = "<value>" }
+    else if (metavar != "") { val = "<" metavar ">" }
+    else if (typ != "") { val = "<" typ ">" }
+    else { val = "<value>" }
+    if (!is_bool && (nargs == "+" || nargs == "*")) val = val "..."
+
+    d = (desc == "" ? "argument parsed by this script" : desc)
+    if (defaultv != "") d = d " (default: " defaultv ")"
+
     key = subscope "\t" flags
     if (flags != "" && !(key in seenflag)) {
       seenflag[key] = 1
-      emitf(subscope, flags, (enumv == "" ? "-" : "<value>"), (desc == "" ? "argument parsed by this script" : desc), enumv, "high")
+      emitf(subscope, flags, val, d, enumv, "high")
     }
   }
   if (match(line, /^def[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/)) {
@@ -889,13 +1008,13 @@ function emitn(kind, name, desc, conf) {
     rest = substr(line, RSTART + RLENGTH)
     if (match(rest, /['"][-A-Za-z0-9_.\/]+['"]/)) {
       cmd = substr(rest, RSTART + 1, RLENGTH - 2)
-      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s|%s:%d|static:python\n", TOOL, cmd, FILENAME, FNR }
+      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s|%s:%d|static:python\n", TOOL, cmd, FILENAME, STMT_LINE }
     }
   } else if (match(line, /os\.system\(['"]/)) {
     rest = line; sub(/^.*os\.system\(['"]/, "", rest)
     if (match(rest, /^[-A-Za-z0-9_.\/]+/)) {
       cmd = substr(rest, RSTART, RLENGTH)
-      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s|%s:%d|static:python\n", TOOL, cmd, FILENAME, FNR }
+      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s|%s:%d|static:python\n", TOOL, cmd, FILENAME, STMT_LINE }
     }
   }
 }
