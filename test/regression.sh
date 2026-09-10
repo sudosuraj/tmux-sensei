@@ -209,6 +209,35 @@ done
 EOF
 chmod +x "$WORK/bin/esaclinetool"
 
+# ── fixture: a flag's VALUE that coincidentally matches another real
+# subcommand's name -- regression for _spec_chosen_sub picking the first
+# word that matches ANY known subcommand, with no awareness that it might
+# just be the value of an already-typed flag.
+cat > "$WORK/bin/subvaltool" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  scan)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --format) FORMAT="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    ;;
+  report)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --output) OUT="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    ;;
+esac
+EOF
+chmod +x "$WORK/bin/subvaltool"
+
 # ── fixture: argparse value-taking/metadata, interpreter deliberately
 # missing (python3-notreal) so --help can never run and every result below
 # is forced through static analysis alone -- a real interpreter would also
@@ -449,6 +478,12 @@ assert_contains "esaclinetool scan shows --config (correctly global)"         "$
 assert_contains "esaclinetool report ALSO shows --verbose (proves it's global, not stuck on scan)" "$esacline_report" '--verbose'
 assert_contains "esaclinetool report ALSO shows --config (proves it's global, not stuck on scan)"  "$esacline_report" '--config'
 assert_not_contains "esaclinetool report does NOT show --target (scan-only)"  "$esacline_report" '--target'
+
+printf '\n12c. A flag'"'"'s value that coincidentally names a real subcommand is not mistaken for one\n'
+subval_out="$("$SENSEI" args subvaltool --format scan report 2>&1)"
+assert_contains "subvaltool --format scan report picks \"report\" as the subcommand (not \"scan\", --format's value)" "$subval_out" 'subcommand: report'
+subval_normal="$("$SENSEI" args subvaltool scan --format json 2>&1)"
+assert_contains "subvaltool scan --format json still picks \"scan\" normally (no preceding flag)" "$subval_normal" 'subcommand: scan'
 
 printf '\n13. Multi-word keyword queries boost a candidate matching several concepts\n'
 rank_multi="$("$SENSEI" args ranktool target domain 2>&1)"

@@ -1600,7 +1600,24 @@ _spec_chosen_sub() {  # $1=tool $2=start $3=end -- word0 word1 ...
   local -a w=("$@")
   local i
   for ((i = start; i < end; i++)); do
-    if _spec_is_sub "$tool" "${w[$i]}"; then printf '%s' "${w[$i]}"; return; fi
+    if _spec_is_sub "$tool" "${w[$i]}"; then
+      # A word that matches a real subcommand name is still just a
+      # FLAG'S VALUE if the word right before it is a known,
+      # value-taking flag -- "--format scan report" (a --format that
+      # happens to accept the value "scan", with "report" the actual
+      # subcommand typed after it) would otherwise pick "scan" as the
+      # chosen subcommand just because it comes first and happens to
+      # share a name with one, silently shadowing the real one. Checked
+      # under THIS candidate's own scope (the best guess available,
+      # since the real scope isn't known until a candidate is accepted)
+      # -- if that scope is wrong, this word isn't a real flag there
+      # either and the check is simply a safe no-op.
+      if [ "$i" -gt "$start" ]; then
+        local vinfo; vinfo=$(_spec_flag_value "$tool" "${w[$i]}" "${w[$((i-1))]}")
+        if [ -n "$vinfo" ] && [ "${vinfo%%$'\t'*}" != "-" ]; then continue; fi
+      fi
+      printf '%s' "${w[$i]}"; return
+    fi
   done
 }
 
