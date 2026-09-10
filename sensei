@@ -1365,20 +1365,39 @@ _ensure_sub_cache() {  # $1=tool $2=sub -> prints the cache FILE PATH
 # known subcommand names) always; that ONE subcommand's own flags too, but
 # only when asked for -- this is what keeps discovery lazy.
 #
-# Memoized for the life of this one sensei process: a single `cmd_args`/
-# `cmd_complete` call queries this same (tool, sub) pair repeatedly (once
-# per already-typed word to find the chosen subcommand, again for its flag
-# value, again to list flags/subcommands) -- without this, each of those
-# re-resolves the binary path, re-stats its mtime, and re-`cat`s the same
-# on-disk cache file from scratch. One process only ever needs one blob.
+# Memoized for as long as $_SPEC_BLOB_VAL survives: a single `cmd_args`/
+# `cmd_complete` call site sometimes queries this same (tool, sub) pair
+# more than once (e.g. the flags-listing call site below combines
+# _spec_flags_expanded and _spec_named into ONE command substitution
+# specifically so they share one blob instead of two separate re-reads)
+# -- without a working memo, each of those re-resolves the binary path,
+# re-stats its mtime, and re-`cat`s the same on-disk cache file from
+# scratch. Note the real boundary this buys: bash forks a subshell for
+# EVERY `$(...)` capture, and a plain global assignment made inside one
+# does not survive past it -- so this only actually holds across calls
+# made within the SAME subshell (as the combined call site above does
+# deliberately), not across every separate $(...)-captured call cmd_args/
+# cmd_complete make in a row. Full process-wide reuse would need those
+# callers restructured to stop capturing via $(...) at all; not done here,
+# since the per-call cost this avoids is a `command -v` + `stat` + `cat`
+# of an already-generated, small on-disk file, not a re-probe or
+# re-analysis (_ensure_cache_generic's own mtime check already prevents
+# that, independent of this memo).
+#
+# The memo lives ONLY in $_SPEC_BLOB_VAL, never on stdout: every caller
+# below needs the blob as awk's INPUT, and `_spec_blob_for ... | awk ...`
+# (the previous shape of every caller here) runs the left side of that
+# pipe in a forked subshell too -- any assignment to _SPEC_BLOB_KEY/
+# _SPEC_BLOB_VAL made there died with that subshell just the same,
+# meaning the memo NEVER actually held even within one combined call site,
+# silently recomputing on every single call. Called as a plain statement
+# (never piped) so its assignments land in the caller's own shell, then
+# read back from the global right after via a herestring, not a pipe.
 _SPEC_BLOB_KEY=""
 _SPEC_BLOB_VAL=""
-_spec_blob_for() {  # $1=tool $2=sub(may be empty)
+_spec_blob_for() {  # $1=tool $2=sub(may be empty) -- result in $_SPEC_BLOB_VAL, not stdout
   local tool="$1" sub="$2" key="$1|$2"
-  if [ "$key" = "$_SPEC_BLOB_KEY" ]; then
-    printf '%s' "$_SPEC_BLOB_VAL"
-    return 0
-  fi
+  [ "$key" = "$_SPEC_BLOB_KEY" ] && return 0
   local f; f="$(_ensure_top_cache "$tool")" || return 1
   local blob=""
   [ -n "$f" ] && blob="$(cat "$f")"
@@ -1389,15 +1408,15 @@ $(cat "$sf")"
   fi
   _SPEC_BLOB_KEY="$key"
   _SPEC_BLOB_VAL="$blob"
-  printf '%s' "$blob"
 }
 
 _spec_have_tool() { command -v "$1" >/dev/null 2>&1; }
 _spec_is_sub() {      # $1=tool $2=word
-  _spec_blob_for "$1" "" | awk -F'|' -v s="$2" '$1=="S" && $3==s {f=1} END{exit !f}'
+  _spec_blob_for "$1" ""
+  awk -F'|' -v s="$2" '$1=="S" && $3==s {f=1} END{exit !f}' <<<"$_SPEC_BLOB_VAL"
 }
-_spec_tool_summary() { _spec_blob_for "$1" "" | awk -F'|' '$1=="T"{print $3; exit}'; }
-_spec_subs() { _spec_blob_for "$1" "" | awk -F'|' '$1=="S"{print $3"\t"$4}'; }
+_spec_tool_summary() { _spec_blob_for "$1" ""; awk -F'|' '$1=="T"{print $3; exit}' <<<"$_SPEC_BLOB_VAL"; }
+_spec_subs() { _spec_blob_for "$1" ""; awk -F'|' '$1=="S"{print $3"\t"$4}' <<<"$_SPEC_BLOB_VAL"; }
 # "alias<TAB>value<TAB>desc<TAB>enum<TAB>source<TAB>location<TAB>confidence"
 # -- every consumer that only needs the first 3-4 fields (the compact
 # table, prefix/keyword matching) keeps working untouched; the trailing
@@ -1414,12 +1433,14 @@ _spec_subs() { _spec_blob_for "$1" "" | awk -F'|' '$1=="S"{print $3"\t"$4}'; }
 # ever valid under one arm of a script's own dispatch would leak into the
 # global suggestion list, and into every OTHER subcommand's list too.
 _spec_flags_expanded() {  # $1=tool $2=sub(may be empty)
-  _spec_blob_for "$1" "$2" | awk -F'|' -v want="$2" '
-    $1=="F" && ($3=="" || $3==want) { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i]"\t"$5"\t"$6"\t"$7"\t"$8"\t"$9"\t"$10 }'
+  _spec_blob_for "$1" "$2"
+  awk -F'|' -v want="$2" '
+    $1=="F" && ($3=="" || $3==want) { n = split($4, a, ","); for (i = 1; i <= n; i++) print a[i]"\t"$5"\t"$6"\t"$7"\t"$8"\t"$9"\t"$10 }' <<<"$_SPEC_BLOB_VAL"
 }
 _spec_flag_value() {  # $1=tool $2=sub $3=flag -> "value<TAB>enum" if $3 is a known value-taking flag
-  _spec_blob_for "$1" "$2" | awk -F'|' -v f="$3" -v want="$2" '
-    $1=="F" && ($3=="" || $3==want) { n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == f) { print $5"\t"$7; exit } }'
+  _spec_blob_for "$1" "$2"
+  awk -F'|' -v f="$3" -v want="$2" '
+    $1=="F" && ($3=="" || $3==want) { n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == f) { print $5"\t"$7; exit } }' <<<"$_SPEC_BLOB_VAL"
 }
 # static-analysis-derived variables/targets/env-refs/invoked-tools -- see
 # the STATIC ANALYSIS section. Shaped IDENTICALLY to _spec_flags_expanded's
@@ -1439,7 +1460,8 @@ _spec_flag_value() {  # $1=tool $2=sub $3=flag -> "value<TAB>enum" if $3 is a kn
 # precisely to answer "does this file relate to X" from source, not "what
 # can I type next") surfaces them via _static_rows_unified, unfiltered.
 _spec_named() {  # $1=tool $2=sub(may be empty)
-  _spec_blob_for "$1" "$2" | awk -F'|' '$1=="N" && $3!="func" && $3!="alias" {printf "%s\t-\t%s (%s)\t\t%s\t%s\t%s\n", $4, $5, $3, $6, $7, $8}'
+  _spec_blob_for "$1" "$2"
+  awk -F'|' '$1=="N" && $3!="func" && $3!="alias" {printf "%s\t-\t%s (%s)\t\t%s\t%s\t%s\n", $4, $5, $3, $6, $7, $8}' <<<"$_SPEC_BLOB_VAL"
 }
 
 # two shapes share this one entry point, disambiguated by whether the
