@@ -6,20 +6,22 @@
 </p>
 
 <p align="center">
-  📖 <a href="wiki/tmux-sensei-blog.md">Read the full walkthrough</a> — every feature explained in plain language, with screenshots.
+  <img src="wiki/images/demo.gif" alt="sensei's dynamic Tab-completion, live in tmux" width="720">
+</p>
+
+<p align="center">
+  📖 <strong><a href="wiki/tmux-sensei-blog.md">Read the full walkthrough</a></strong> — philosophy, every feature, every keybind, with screenshots.
 </p>
 
 ---
 
 ## Install
 
-**One line** (convenient):
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sudosuraj/tmux-sensei/main/install.sh | bash
 ```
 
-**Read-it-first** (the way this config would want you to — see Law #1):
+Prefer to read it first (see Law #1 in the wiki)?
 
 ```sh
 git clone https://github.com/sudosuraj/tmux-sensei
@@ -35,188 +37,23 @@ exec $SHELL              # picks up PATH + `stty -ixon`
 tmux                     # prefix is C-s
 ```
 
-The installer is idempotent, backs up any existing `~/.config/tmux/tmux.conf`, works on Linux and macOS, and touches nothing outside `~/.config/tmux`, `~/.local/bin`, and two lines in your shell rc. Requires **tmux ≥ 3.3** (developed on 3.4) and bash.
-
-Uninstall anytime: `./uninstall.sh` (restores your previous config from the backup it made).
+Idempotent, backs up any existing `~/.config/tmux/tmux.conf`, Linux + macOS, touches nothing outside `~/.config/tmux`, `~/.local/bin`, and two lines in your shell rc. Requires **tmux ≥ 3.3** (developed on 3.4) and bash. Uninstall anytime with `./uninstall.sh`.
 
 ---
 
-## Quick reference — every shortcut and command
+## What it is, in one breath
 
-`C-s` is the prefix. A key marked **no prefix** works on its own (usually `Alt`). Pulled straight from `tmux-sensei.conf` and `sensei`, so this stays accurate as either changes — if you rebind something, update it here too.
+Five opinions drive every default — full reasoning in the [wiki](wiki/tmux-sensei-blog.md):
 
-### Nested tmux & the prefix
+1. **Auditable or it doesn't run** — one config, one script, readable in an afternoon.
+2. **Degrades to a serial console** — 256-colour, ASCII, no glyphs.
+3. **tmux never presses Enter for you** — anything aimed at a target is staged, never fired.
+4. **Every session is a case file** — evidence logging is one keystroke.
+5. **Experiments run on their own socket** — break things without touching a live engagement.
 
-| Key | How to use it |
-|---|---|
-| `C-s C-s` | Send a literal prefix keystroke through to a tmux running inside this one (SSH'd into a box that's also on tmux) |
-| `F12` (no prefix) | Hand the keyboard entirely to whatever's in the current pane — local tmux visibly goes deaf. `F12` again to take it back |
+On top of that: a modal pane-management layer, per-session evidence logging, staged recon chains (`sensei burst`), a grep-layer for scrollback (IPs, hashes, tokens, secrets, errors — one key each), and fully dynamic, zero-config argument help — `sensei args` / `C-s H` / real Tab-completion that works on *any* tool on your `$PATH` by asking the tool itself, with no built-in list to maintain.
 
-### Moving around (no prefix — Alt)
-
-| Key | How to use it |
-|---|---|
-| `Alt-h` / `j` / `k` / `l` | Move to the pane left / down / up / right |
-| `Alt-H` / `J` / `K` / `L` | Resize the current pane in that direction |
-| `Alt-1` … `Alt-5` | Jump straight to window 1–5 |
-| `Alt-o` | Jump to the last window you were on |
-| `Alt-z` | Zoom the current pane full-screen (press again to unzoom) |
-| `Alt-g` | Open the persistent scratch popup (see [Popups](#popups)) |
-
-### Windows & panes (prefix)
-
-| Key | How to use it |
-|---|---|
-| C-s \| | Split vertically (new pane inherits the current working directory) |
-| `C-s -` | Split horizontally (inherits cwd) |
-| `C-s c` | New window (inherits cwd) — names itself after whatever's running, falling back to the shell name when idle. `sensei case`/`burst` windows don't do this; their phase names (`recon`, `fuzz`…) stay fixed on purpose |
-| `C-s Q` | Kill the current pane — **no confirmation** |
-| `C-s C-q` | Kill the whole session — asks `y/n` first |
-| `C-s r` | Respawn the current pane (kill + restart the same command) |
-| `C-s s` | Session/window picker (`choose-tree`) |
-| `C-s R` | Reload the config |
-
-### The sensei modal layer
-
-| Key | How to use it |
-|---|---|
-| `C-s Space` | Enter the modal layer — **stays active until `Esc`** (status bar shows a reverse-video `MODAL` tag the whole time) |
-| `h j k l` | (inside the layer) move between panes |
-| `H J K L` | (inside the layer) resize |
-| `o` | (inside the layer) main-vertical layout |
-| `e` | (inside the layer) tiled layout |
-| `m` | (inside the layer) swap this pane with the next |
-| `x` | (inside the layer) kill this pane — **no confirmation** |
-| `Esc` or `q` | Leave the layer |
-
-### Copy-mode & the clipboard
-
-| Key | How to use it |
-|---|---|
-| `C-s [` | Enter copy-mode |
-| `C-s /` | Enter copy-mode and start an incremental search |
-| `C-s ]` | Paste the most recent buffer |
-| `C-s b` | List every tmux buffer (raw tmux picker) |
-| `v` | (in copy-mode) start a selection |
-| `C-v` | (in copy-mode) toggle rectangle/block selection |
-| `y` | (in copy-mode) copy the selection — over OSC 52, so it reaches your real clipboard even through SSH |
-| `Esc` | (in copy-mode) cancel out |
-| Mouse drag, release | Select with the mouse; releasing copies it (doesn't jump the view) |
-| Scroll wheel up | First scroll enters copy-mode and scrolls; further scrolling just scrolls |
-
-### The grep-layer (inside copy-mode)
-
-One key each, instead of piping a pane through `grep`:
-
-| Key | Finds |
-|---|---|
-| `Alt-i` | IPs (with an optional `:port`) |
-| `Alt-u` | URLs |
-| `Alt-x` | Hashes (md5/sha) |
-| `Alt-t` | Tokens & keys (JWT, AWS keys, GitHub tokens, PEM blocks) |
-| `Alt-s` | Secret-looking words (`token`, `api_key`, `password`, `authorization`…) |
-| `Alt-e` | Errors (`ERROR`, `Traceback`, `denied`, `refused`, `403`, `500`…) |
-
-### Target, evidence & staging
-
-| Key | How to use it |
-|---|---|
-| `C-s t` | Set `@target` (typed into a prompt; shown in the status bar) |
-| `C-s T` | Stage a `burst.conf` chain for the current target — types commands, never runs them |
-| `C-s C` | Build a new case: a session with `recon`/`fuzz`/`shell`/`notes` windows and a loot dir |
-| `C-s N` | Open the case-notes popup |
-| `C-s C-l` | Toggle evidence logging for the whole session (backfills existing scrollback) |
-| `C-s P` | Dump the current pane's scrollback into the case folder |
-
-### Attacker IP, search & clipboard picker
-
-| Key | How to use it |
-|---|---|
-| `C-s i` | Copy the tunnel (VPN) IP straight to your clipboard |
-| `C-s I` | Open a clickable menu of every IP — click one to copy it |
-| `C-s B` | Numbered picker of your last 20 copies, with a preview of each |
-| `C-s F` | Type a pattern; greps every pane's scrollback in the session and lists which panes matched |
-
-### Argument help — context-aware, not history-based
-
-The thing shell history can't do: tell you what a tool's *next* flag, subcommand, or value actually is, the first time you use it. See [below](#context-aware-argument-help) for the full story.
-
-| Key | How to use it |
-|---|---|
-| `C-s H` | Popup: what comes next for the command in this pane — subcommand, flag, or the value a flag expects. Prefilled from whatever's typed (unsent) in the pane, editable before you look it up |
-| `Tab` (in your shell) | Real completion for covered tools, once `sensei setup-shell` has wired it in — same reference, no popup needed |
-
-### Modes & recovery
-
-| Key | How to use it |
-|---|---|
-| `C-s S` | Toggle `synchronize-panes` — broadcasts keystrokes to every pane in the window. **Loud on purpose**: borders and status bar both show `[SYNC]` |
-| `C-s M` | Resync mouse tracking — press this if scrolling/clicking starts typing gibberish into the shell |
-| `C-s a` | Arm silence-watch on this window (flags it `(quiet)` after 45s of no output) |
-| `C-s A` | Disarm silence-watch |
-
-### Click instead of prefix+key
-
-`mouse on` is set, so a lot of this needs no keybind at all:
-
-| Click | What it does |
-|---|---|
-| A window's name in the bottom status line | Switch straight to it — no `C-s`, no number (this is a stock tmux behavior tmux-sensei never disabled) |
-| A pane's border (the strip showing `1 bash (12m)` above every pane) | Jump focus to that pane |
-| Anywhere in a pane | Focus it (stock tmux behavior) |
-| The right side of the **top** status line, where the VPN readout lives | Copy the tunnel IP — same as `C-s i` |
-| Right-click a window name | Context menu (rename, kill, swap, new window…) |
-| Drag inside a pane, release | Select text and copy it (OSC 52) without disturbing the scroll position |
-| Shift+drag | Bypass tmux and select with your *local* terminal instead (works over SSH) |
-
-### Popups
-
-| Key | How to use it |
-|---|---|
-| `Alt-g` (no prefix) | Persistent scratch popup — same shell every time, survives detach (`C-s d` to leave it running) |
-| `C-s E` | Edit the config in `$EDITOR` and reload automatically on save |
-| `C-s g` | Git popup (`lazygit` if installed, else `git status`) |
-| `C-s ?` | Curated cheat sheet of everything on this page — not tmux's raw, unfiltered `list-keys` dump |
-| `C-s X` | Open the lab — a fully separate tmux socket + config for breaking things on purpose |
-| `C-s C-x` | Burn the lab (kill it instantly, from your real session) |
-
-### `sensei` — the command-line side
-
-Every one of these is also safe to type by hand outside of a keybinding:
-
-| Command | How to use it |
-|---|---|
-| `sensei case <name>` | Build the session skeleton described above (same as `C-s C`) |
-| `sensei burst <sess> <target> [profile]` | Stage a `burst.conf` chain — pick a profile explicitly, or let it prompt when there's more than one |
-| `sensei log toggle <sess>` | Arm/disarm evidence logging by hand |
-| `sensei dump <pane> <sess>` | Flush one pane's scrollback to the case folder |
-| `sensei notes <sess>` | Open the case notebook |
-| `sensei save [name]` / `sensei restore [name]` | Snapshot every session's layout + cwd, or rebuild it later (processes are never re-run) |
-| `sensei findall <sess> <pattern>` | Same as `C-s F`, callable directly; `SENSEI_FINDALL_LINES=0` searches full scrollback instead of the last 5000 lines |
-| `sensei bufmenu` | Same as `C-s B`, callable directly |
-| `sensei strip <logfile>` | Strip ANSI codes from a log so it's clean for a report |
-| `sensei vpn` | Print the tun/wg status-bar readout by hand |
-| `sensei setup-shell` | Opt-in: wire up live ghost-text autosuggestions (bash `ble.sh` / zsh `zsh-autosuggestions`) **and** dynamic, tool-agnostic Tab-completion — works on anything on PATH, not a fixed list |
-| `sensei args <tool> [args so far...]` | Same as `C-s H`, callable directly — what comes next: subcommand, flag, or the value a flag expects |
-| `sensei tools` | List every tool sensei has probed and cached so far |
-| `sensei discover <tool> [sub]` | Force a fresh probe, ignoring the cache (a tool got upgraded, say) |
-| `sensei experiment <name>` | Scaffold a new drop-in idea in `~/.config/tmux/local.d/` and open it |
-| `sensei update` | Check for and install updates — stages to a temp file and asks before running, never a blind `curl` piped into `bash` |
-| `sensei help` | Print the same cheat sheet `C-s ?` shows |
-
----
-
-## Why another tmux config
-
-I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and every default follows from them:
-
-| # | Law | What it buys you |
-|---|-----|------------------|
-| 1 | **Auditable or it doesn't run.** One config + one script. | You can read the entire thing in an afternoon. No plugin manager pulling code you never see. |
-| 2 | **Degrades to a serial console.** 256-colour indices, ASCII status, no glyphs. | Looks identical on your laptop and over a rescue shell into a box you're testing. |
-| 3 | **tmux never presses Enter for you.** Anything aimed at a target is *staged*. | Scope mistakes are career events. The tool refuses to make one for you. |
-| 4 | **Every session is a case file.** Per-session evidence logging, one keystroke. | Evidence is the default, not something you remember to enable at 3am. |
-| 5 | **Experiments run on their own socket.** `tmux -L lab`, loud purple bar. | You break configs constantly and never touch a live engagement. |
+For the full keymap, every `sensei` subcommand, and how to customise it — see the **[wiki](wiki/tmux-sensei-blog.md)**.
 
 ---
 
@@ -225,211 +62,13 @@ I didn't fork anyone's dotfiles. `tmux-sensei` is built from five opinions, and 
 | File | Installs to | Role |
 |------|-------------|------|
 | `tmux-sensei.conf` | `~/.config/tmux/tmux.conf` | the config |
-| `sensei` | `~/.local/bin/sensei` | helper script (logging, cases, staging) |
+| `sensei` | `~/.local/bin/sensei` | helper script |
 | `lab.conf` | `~/.config/tmux/lab.conf` | the experiment socket |
 | `install.sh` / `uninstall.sh` | — | setup / teardown |
-| `local.conf` | `~/.config/tmux/local.conf` | **your** machine-local overrides (created empty, never overwritten) |
-| `burst.conf` | `~/.config/tmux/burst.conf` | **your** recon chains for `sensei burst` (created with no active profile, never overwritten) |
-| — | `~/.config/tmux/local.d/*.conf` | **your** one-file-per-idea experiments (not created by install — `sensei experiment <name>` scaffolds one) |
-| — | `~/.cache/tmux-sensei/toolspecs/` | discovered tool grammars — `sensei args`/`C-s H`/Tab-completion's cache, not a file you edit (see [below](#context-aware-argument-help)) |
-
----
-
-## The prefix, and nested tmux
-
-`C-b` is gone. The prefix is **`C-s`** — dead weight once `stty -ixon` turns off terminal flow control, which the installer wires up for you.
-
-- **`C-s C-s`** — send a literal prefix through to a nested or remote tmux.
-- **`F12`** — hand the keyboard entirely to the inner session. The local tmux goes deaf and its status bar greys out, so you always know which multiplexer you're typing at. `F12` again to take control back.
-
----
-
-## Key map
-
-Movement is **prefix-free** (Alt) — paying a prefix just to move panes is a tax:
-
-```
-M-h M-j M-k M-l     move between panes            M-H M-J M-K M-L   resize
-M-1 … M-5           jump to window N              M-o               last window
-M-z                 zoom pane                     M-g               scratch popup (persistent)
-```
-
-Prefix layer — press **`C-s`** then:
-
-```
-|   -        split vertical / horizontal (inherit cwd)     R    reload config
-c            new window                                     Q    kill pane   C-q  kill session
-Space        enter the sensei MODAL layer (stays until Esc)
-t            set @target  (shown in the status bar)        T    STAGE a recon burst for @target
-C-l          toggle evidence logging (whole session)       P    dump this pane's scrollback → case file
-N            case-notes popup                              C    new case skeleton
-a   A        arm / disarm silence-watch (scan-done alert)
-E   g        edit-config popup / git popup                 X    open lab socket   C-x  burn the lab
-B            numbered paste-buffer picker (last 20 copies)  F    search every pane's scrollback
-S            toggle synchronize-panes (loud when armed — see below)
-M            resync mouse tracking — scroll/click typing gibberish? press this
-H            argument help for the command in this pane — what comes next
-             (subcommand / flag / value), prefilled from what's typed
-```
-
-### `S` — synchronize-panes, on purpose
-
-Broadcasts every keystroke to every pane in the window — genuinely useful for re-running one command across parallel hosts or restarting several listeners at once. It's also the one binding here that can do real damage if you forget it's on: type into a pane you thought was just yours and it goes everywhere, including an `ssh` session to a client host. So it's loud on purpose — pane borders and the status bar both show **`[SYNC]`**/**`SYNC`** as text (not just a color, so it still shows on a serial console) the instant it's armed, and it's a deliberate two-key toggle, never something bound without a prefix.
-
-### The sensei modal layer (`C-s Space`)
-
-tmux key-tables are the most underused feature in the program: a real modal mode, no plugin required. `C-s Space` enters it and it **stays** until you hit `Esc`, so a burst of window surgery costs one prefix instead of eight.
-
-```
-h j k l   move          H J K L   resize          x   kill pane
-o         main-vertical  e        tiled            m   swap pane
-Esc / q   leave
-```
-
-### Copy-mode is a grep layer
-
-Scrollback is evidence. These are the things you actually hunt for in it — one key each, so you never pipe a pane through `grep` just to find an IP. Enter copy-mode with `C-s [`, then:
-
-```
-M-i   IPs (+ optional :port)          M-u   URLs
-M-x   hashes (md5 / sha)              M-t   tokens & keys (JWT, AWS AKIA, GitHub, PEM)
-M-s   secret-ish words (token, api_key, authorization, bearer, password)
-M-e   errors (ERROR, Traceback, denied, refused, 403, 500)
-v     select      C-v  block-select      y   copy (→ system clipboard via OSC 52, even over SSH)
-```
-
----
-
-## The `sensei` script
-
-Every subcommand is safe to run by hand; the config just binds keys to them. Evidence lands under `~/loot/<session>/` (override with `SENSEI_LOOT`).
-
-```
-sensei case <name>            new session: recon / fuzz / shell / notes windows + a loot dir
-sensei log toggle <sess>      arm / disarm per-session evidence logging (retro-fits every pane)
-sensei dump <pane> <sess>     flush a pane's scrollback into the case dir
-sensei burst <sess> <target> [profile]   STAGE a chain from burst.conf into N tiled panes — no Enter
-sensei notes <sess>           open the case notebook (notes.md)
-sensei save   [name]          snapshot layout + cwd of every session
-sensei restore [name]         rebuild that layout (geometry + cwd only — processes are NOT re-run)
-sensei strip <logfile>        ANSI-strip a log for a report
-sensei vpn                    the tun/wg indicator shown in the status bar (also fires an alert on drop)
-sensei bufmenu                numbered pick-list of the last 20 copied buffers, with a preview
-sensei findall <sess> <pat>   grep the last 5000 lines/pane (SENSEI_FINDALL_LINES=0 for everything)
-sensei args <tool> [...]      what comes next for this command — subcommand, flag, or a flag's value
-sensei tools                  list every tool sensei has probed and cached so far
-sensei discover <tool> [sub]  force a fresh probe, ignoring the cache
-```
-
-### `sensei burst` — the whole safety philosophy in one command
-
-`C-s t` sets a target; `C-s T` opens a tiled window and **types** a recon chain into as many panes as the chain has commands. sensei ships **no opinion about which tools you run** — the chain lives entirely in `~/.config/tmux/burst.conf`, which installs with no active profile, as named `[profile]` sections:
-
-```
-[web]
-subfinder -silent -d {target} | anew subs.txt
-httpx -l subs.txt -sc -title -tech-detect -o http.txt
-nuclei -l http.txt -severity medium,high,critical -o nuclei.txt
-ffuf -u https://{target}/FUZZ -w ~/wl/raft-small.txt -mc all -fc 404 -o ffuf.json
-
-[ad]
-nmap -sC -sV -oA nmap-{target} {target}
-netexec smb {target} -u '' -p '' --shares
-enum4linux-ng -A {target}
-```
-
-`{target}` is substituted with your `@target`; one pane opens per line, so an internal-AD chain and a five-tool web chain each get exactly the number of panes they need. Define one profile and `T` runs it directly; define several and `T` pops a pick-list so you choose per engagement instead of the tool guessing. And it **stops**. Nothing runs. You read each command, fix the scope, and press Enter yourself — the tool lays the work out for you but will never fire a scan at a target because you fat-fingered a keybind, or because it assumed you're doing a bug bounty when you're actually on an internal AD box.
-
-### `sensei setup-shell` — live ghost-text, opt-in only
-
-tmux can't give you Fish-style history autosuggestions — that's a shell feature, not a multiplexer one — so this configures your **shell**, not tmux, and never touches your login shell without asking first.
-
-- **bash:** if [`ble.sh`](https://github.com/akinomyoga/ble.sh) is installed, wires it in for real per-keystroke ghost text (updates as you type, right-arrow/End to accept). If it isn't, falls back to prefix history-search on up/down (works immediately, no packages) and prints the (non-`curl|bash`) install command for ble.sh.
-- **zsh:** wires in `zsh-autosuggestions` the same way if it's installed, or tells you how to get it.
-
-Run it again any time you install one of these later — it's idempotent and only ever appends once.
-
-### Context-aware argument help
-
-Fully dynamic — no built-in tool list, nothing to configure. Ghost-text (above) only ever replays what you've typed before — no help the first time you run a tool, or for the one flag in fifty you never remember. sensei runs `<tool> --help` (falling back to `-h`), parses whatever comes back into flags/subcommands/values, and caches the result. It works on anything already on your `$PATH` — a tool you wrote yourself yesterday included — the moment you use it, not because someone taught sensei its name first.
-
-Three ways in, same engine:
-
-- **Tab, for real, in your shell.** `sensei setup-shell` wires this in as a *fallback*, not a per-tool registration, so there's no list of names to keep in sync — it only steps in for a command that doesn't already have completion of its own (a tool with real bash-completion installed, like `git` or `apt`, keeps using that). Under the hood bash and zsh need genuinely different mechanisms to pull this off cleanly — bash via `complete -D` (its own documented default-completer hook), zsh via prepending itself to the `completer` zstyle chain, which existing customization (oh-my-zsh, etc.) is preserved around, not overwritten — but the effect is the same either way. Press Tab after `nmap -sC -sV -` and you get nmap's actual remaining flags, not filenames in `$PWD`. After `nmap -T`, Tab offers `0 1 2 3 4 5`, because nmap's own help spelled out that it's a small closed set. After `ffuf -w`, Tab falls back to real filename completion, because a wordlist path can't be enumerated. The *first* Tab on a brand-new command probes and parses it — a small, bounded pause (`SENSEI_PROBE_TIMEOUT`, default 2s) — every Tab after that is instant, served from cache. `setup-shell` also fixes the other half of this: a tool with hundreds of flags (curl has 300+) would otherwise dump the whole list straight into your scrollback as permanent text, the way stock bash/zsh completion always has — instead it wires zsh's own interactive menu (`zstyle ':completion:*' menu select` — arrow keys, Enter, and it clears away rather than getting printed) and rebinds bash's Tab to cycle candidates in place (`menu-complete` — each press substitutes the next match directly into the line, Shift-Tab to go back). This changes how *all* Tab-completion behaves in your shell, not just sensei's — that's the trade-off for not spamming scrollback.
-- **`C-s H`**, any time, even mid-typing. Pops up prefilled with whatever's (unsent) on the command line in that pane — edit it if the guess is off, hit Enter to look it up, empty line to close.
-- **`sensei args <tool> [args so far...]`** by hand. `sensei args nmap` dumps the whole reference; `sensei args nmap -sC -sV -T` tells you `-T` expects `0-5`. `sensei tools` lists everything sensei has looked at so far; `sensei discover <tool> [sub]` forces a fresh probe (a tool got upgraded and you want its cache rebuilt sooner than the automatic mtime check would catch it).
-
-Don't remember the flag's prefix, just a word buried in it? Type that word, no dashes, wherever it actually falls in the name. `tool admin<Tab>` (or `sensei args tool admin`) against a tool with `--count-admin`, `--list-admins`, `--admin-only`, and `--username` surfaces the first three, not the fourth — matched against each flag's own hyphen-separated words first (an exact word beats one that merely starts with it, which beats a bare substring), falling back to the description text only if nothing in the name itself matches. Same logic covers subcommand names. An exact prefix match never suppresses this: `tool --user<Tab>` (or `sensei args tool --user`) shows `--user-agent` as the exact hit *and* `--username`/`--create-user`/`--current-user` right alongside it under a separate "also related to" section — remembering the concept ("user") is enough even when part of what you typed already matches something exactly on its own. Precise queries stay precise either way — `-s<Tab>` still narrows to `-sS`/`-sV`/etc. exactly as before, and a 1-2 character query (after stripping dashes) never triggers the keyword side at all, so it can't turn short, deliberate flag-letter completion into noise.
-
-**Honest limits, because "fully dynamic" is a real trade-off, not a free lunch:** parse quality depends entirely on how the tool's own `--help` is formatted. Most modern Go/Python CLI tools (the ffuf/nuclei/gobuster/sqlmap/curl/openssl/docker end of the world), and even older ones with less regular formatting like nmap, parse into real flags, values, and often enumerated choices — nmap's own `-T<0-5>:` notation (the value glued straight onto the flag, no space) resolves to the same `0 1 2 3 4 5` a hand-curated reference would give you. What still degrades to flag-*names*-only (no clean description/value split) is text that genuinely has nothing else to go on in that shape — a description that argparse wrapped onto its own line with nothing left on the flag's line, or a tool like `git` whose top-level `--help` is prose with no flag list at all (sensei correctly finds nothing there, rather than guessing wrong). Worst case is no completion offered for a line; there is no tool this makes up a flag for. A probe only ever runs `<tool> --help` or `<tool> -h` (or, for a subcommand, `<tool> <sub> --help`/`-h`) — never through `sudo`, never with any other argument, stdin closed, output timeboxed — close to universal, side-effect-free conventions, but not a guarantee for every binary that might be on your PATH. Exclude a specific tool from ever being probed with `SENSEI_NO_PROBE="tool1 tool2"`.
-
----
-
-## The status bar
-
-Two lines, and the only things that get colour are the ones that can hurt you:
-
-- **top:** a `^` when the prefix is armed · `sensei` + session name · short hostname · **`tgt:<target>`** (peach) when a target is set · **`REC`** (green) when logging is on · **`SYNC`** (red) when synchronize-panes is armed · the VPN/interface indicator, which also fires an active alert (not just a color change) the instant the tunnel drops · clock.
-- **bottom:** your windows, named by phase. A window that's gone quiet shows `(quiet)` if silence-watch is armed.
-- **pane borders:** now also show how long the current foreground command has been running, e.g. `nmap (12m)` — paired with silence-watch, that's "still working" vs. "probably hung" at a glance across a dozen panes.
-
-Pane borders carry state too: the border and title show what's running, tag `[remote]` on an `ssh` pane, and turn **red** the moment a pane is running `ssh` or `sudo`.
-
----
-
-## Customising it
-
-**Golden rule: never edit `tmux.conf` directly for machine-specific tweaks.** Put them in `~/.config/tmux/local.conf`, which is sourced last and is never touched by updates. That keeps your fork clean and lets a VPS differ from your laptop with no branch.
-
-Common overrides — drop these in `local.conf`:
-
-```tmux
-# prefer a different prefix
-set -g prefix C-a
-unbind C-s
-bind C-a send-prefix
-
-# truecolor terminal? turn it on (kept off by default for Law #2)
-set -ga terminal-overrides ',*256col*:Tc'
-
-# move where evidence is written (also honoured by the sensei script via env)
-# put `export SENSEI_LOOT=~/engagements` in your shell rc instead, for the script side
-
-# your own colour taste
-set -g status-style 'bg=colour236,fg=colour250'
-```
-
-Change the **staged recon chain(s)** to match your own workflow: edit `~/.config/tmux/burst.conf`, not the script. Add or edit a `[profile]` section, one command per line, `{target}` where the target goes — the script never needs touching, and **never put a literal Enter/newline mid-command** unless you want to throw away Law #3. Override the file location entirely with `SENSEI_BURST_CONF=/path/to/file`.
-
-Add your own **grep-layer hunts**: copy one of the `bind -T copy-mode-vi M-… search-backward '…'` lines in `tmux-sensei.conf` and swap the regex (tmux search is case-sensitive, so bake case into the pattern).
-
-Add your own **modal keys**: extend the `bind -T sensei …` block. End each binding with `switch-client -T sensei` if you want the layer to stay open after the key.
-
-Reload after any change with **`C-s R`**, or `C-s E` to open the config in an editor and reload on save.
-
-### Experimenting without breaking anything
-
-Three different tools for three different amounts of commitment:
-
-- **`:` (tmux's own command prompt)** — try any tmux command live, right now, no file touched at all. Reload wipes it away automatically. This is where "does this even work" questions belong before they're worth writing down anywhere.
-- **`sensei experiment <name>`** — for the idea that survived the `:` test and you want to live with for a while. Scaffolds `~/.config/tmux/local.d/<name>.conf` and opens it; `local.d/*.conf` is auto-sourced (in filename order) after `local.conf`. One file per idea instead of one growing pile in `local.conf` — reorder, disable (rename off the `.conf` extension), or `rm` an idea without touching anything else.
-- **`local.conf`** — once something's proven itself, that's where it belongs permanently.
-
-One honest caveat, because tmux's reload semantics deserve to be stated precisely rather than glossed over: deleting a `local.d/` file and reloading correctly reverts any `set`/`setw` **option** it changed, because this config's own defaults unconditionally re-run on every reload and just get sourced again with nothing left to override them — verified this directly. A `bind`/`bind -n` **key**, though, does not auto-revert: `source-file` re-applies commands, it doesn't reset state first, so a binding an experiment added stays bound after you delete the file, until you `unbind` it yourself or restart the server. That's standard tmux behavior, not a sensei limitation — if an experiment adds a key you might want to remove later, `unbind` it in the same file before deleting.
-
----
-
-## What it deliberately does NOT do
-
-- **No process resurrection.** `restore` rebuilds geometry and cwd; *you* decide what re-runs against a live target.
-- **No auto-run of anything network-facing.** `burst` stages and stops.
-- **No telemetry, no phone-home, no plugin fetch.** Ever. The only network traffic is the one-time install download you can read first.
-
----
 
 ## Compatibility
 
-Developed and tested on **tmux 3.4**. Uses `pane-border-format`, key-tables, `display-popup`, and two-line `status-format`, so **3.3 is the practical floor**. The `sensei` script needs bash + coreutils — already present on anything you'd run an engagement from. OSC 52 clipboard needs a terminal that supports it (iTerm2, kitty, WezTerm, Windows Terminal, recent xterm).
+tmux **≥ 3.3** (developed on 3.4), bash + coreutils. OSC 52 clipboard needs a terminal that supports it (iTerm2, kitty, WezTerm, Windows Terminal, recent xterm).
 
 ## License
 
