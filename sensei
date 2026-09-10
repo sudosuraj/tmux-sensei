@@ -37,9 +37,13 @@
 # maintain, nothing to configure. --help/-h is ONE source, not the foundation
 # -- plenty of real pentest tooling is a hand-rolled wrapper script or a
 # one-off with no working --help at all, so sensei ALSO reads a resolved
-# tool's own source directly (functions, getopts/case-based flag parsing,
-# argparse/click calls, Makefile targets, top-level variables -- never
-# executing it, see the STATIC ANALYSIS section) and merges both sources
+# tool's own source directly -- functions, aliases, getopts/case-based flag
+# parsing, argparse/click calls, Makefile targets, top-level variables, the
+# environment variables it actually reads (os.environ/getenv, or a bash
+# $VAR it never assigns itself), and other real, on-PATH programs it shells
+# out to internally (verified with an actual `command -v`, never a
+# hardcoded tool list) -- never executing it, see STATIC ANALYSIS. Merges
+# both sources
 # into the same cache -- so it works on anything already on your $PATH,
 # including a tool you wrote yourself yesterday that doesn't even respond to
 # --help, the moment you use it. `sensei discover <keyword> <path>` runs the
@@ -508,26 +512,71 @@ _script_kind() {  # $1=path -> sh|python|ruby|perl|powershell|make|text|binary
   printf 'text'
 }
 
+# Two passes over the SAME file (see _static_analyze's "sh" branch passing
+# the path twice): pass 1 just collects every name this script assigns
+# ANYWHERE (top-level or inside a function -- `local`/`export`/`readonly`
+# stripped first) so pass 2 can tell "a variable this script sets" apart
+# from "a variable this script only ever READS" -- the latter is exactly
+# what makes something a genuine ENVIRONMENT variable (the caller is
+# expected to export it) rather than an internal one, a distinction a
+# single pass couldn't make on its own. Fully quoted heredoc -- nothing
+# here is bash-interpolated, it's all literal awk source, same as every
+# other _analyze_*_awk/_*_awk_src function in this file.
 _analyze_sh_awk() {
 cat <<'AWKEOF'
 function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
-BEGIN { depth = 0; incase = 0 }
+# bash language keywords/builtins -- NOT tool names -- excluded from the
+# "another program this script invokes" candidate scan below, the same way
+# they're already excluded from being mistaken for anything else here.
+function is_keyword(w) {
+  return w in KW
+}
+BEGIN {
+  split("if then else elif fi for while until do done case esac function select in local declare typeset readonly export unset return exit shift break continue eval exec trap set echo printf read cd pwd test true false source wait kill type command builtin times getopts alias unalias history jobs fg bg disown suspend ulimit umask hash help", kwlist, " ")
+  for (i in kwlist) KW[kwlist[i]] = 1
+}
+NR == FNR {
+  t = trim($0)
+  if (t == "" || t ~ /^#/) next
+  a = t; sub(/^(local|export|readonly|declare|typeset)[ \t]+/, "", a)
+  if (match(a, /^[A-Za-z_][A-Za-z0-9_]*=/)) { n = a; sub(/=.*/, "", n); assigned[n] = 1 }
+  rest = t
+  while (match(rest, /\$\{?[A-Za-z_][A-Za-z0-9_]*/)) {
+    tok = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+    gsub(/^\$\{?/, "", tok)
+    if (tok ~ /^[A-Z][A-Z0-9_]*$/) referenced[tok] = 1
+  }
+  next
+}
+FNR == 1 { depth = 0; incase = 0 }
 {
   t = trim($0)
   if (t == "" || t ~ /^#/) next
+  isdecl = 0
 
   if (match(t, /^(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*\(\)/)) {
     name = substr(t, RSTART, RLENGTH)
     sub(/^function[ \t]+/, "", name); sub(/\(\)$/, "", name)
     if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name }
+    isdecl = 1
   } else if (match(t, /^function[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
     name = substr(t, RSTART, RLENGTH); sub(/^function[ \t]+/, "", name)
     if (name != "" && !(name in seenfn)) { seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name }
+    isdecl = 1
+  }
+
+  if (match(t, /^alias[ \t]+[A-Za-z_][A-Za-z0-9_.-]*=/)) {
+    name = substr(t, RSTART, RLENGTH); sub(/^alias[ \t]+/, "", name); sub(/=$/, "", name)
+    rhs = t; sub(/^alias[ \t]+[A-Za-z_][A-Za-z0-9_.-]*=/, "", rhs)
+    gsub(/^['"]|['"]$/, "", rhs)
+    if (length(rhs) > 60) rhs = substr(rhs, 1, 60) "..."
+    if (name != "" && !(name in seenalias)) { seenalias[name] = 1; printf "N|%s|alias|%s|alias for: %s\n", TOOL, name, rhs }
   }
 
   if (t ~ /^case[ \t].*[ \t]in$/) incase++
   else if (t == "esac" || t ~ /^esac[ \t;]/) { if (incase > 0) incase-- }
   else if (incase > 0 && match(t, /^[-A-Za-z0-9_|]+\)[ \t]*$/)) {
+    isdecl = 1
     patt = t; sub(/\)[ \t]*$/, "", patt)
     n = split(patt, toks, "|")
     flags = ""
@@ -563,9 +612,30 @@ BEGIN { depth = 0; incase = 0 }
     if (!(name in seenvar)) { seenvar[name] = 1; printf "N|%s|var|%s|top-level variable set in this script\n", TOOL, name }
   }
 
+  # a bare leading word on an otherwise plain statement line -- not a shell
+  # keyword/builtin, not itself being assigned, and not a line already
+  # claimed above as a function definition or a case-pattern branch (both
+  # of those also start with what LOOKS like a bare word, but "run_scan()"
+  # and "scan)" are declarations, not invocations) -- a CANDIDATE for
+  # "another program this script invokes." Emitted as its own "C" record;
+  # _static_analyze filters these through a REAL `command -v` check (not a
+  # hardcoded list) before any of them ever becomes a visible row, so this
+  # stays dynamic -- only names actually installed on this system survive.
+  if (!isdecl && match(t, /^[A-Za-z_][A-Za-z0-9_.\/-]*/)) {
+    cand = substr(t, RSTART, RLENGTH)
+    after = substr(t, RLENGTH + 1, 1)
+    if (after != "=" && !is_keyword(cand) && !(cand in seencand)) {
+      seencand[cand] = 1
+      printf "C|%s|%s\n", TOOL, cand
+    }
+  }
+
   tmp = t; op = gsub(/\{/, "{", tmp); cl = gsub(/\}/, "}", tmp)
   depth += op - cl
   if (depth < 0) depth = 0
+}
+END {
+  for (v in referenced) if (!(v in assigned)) printf "N|%s|env|%s|environment variable this script reads\n", TOOL, v
 }
 AWKEOF
 }
@@ -597,6 +667,34 @@ cat <<'AWKEOF'
     name = line; sub(/^def[ \t]+/, "", name); sub(/[ \t]*\(.*/, "", name)
     if (name != "" && substr(name, 1, 1) != "_" && !(name in seenfn)) {
       seenfn[name] = 1; printf "N|%s|func|%s|function defined in this script\n", TOOL, name
+    }
+  }
+
+  # environment variables this script actually reads -- os.environ[...]/
+  # .get(...) and os.getenv(...) are the two conventional ways.
+  if (match(line, /os\.environ\[['"][A-Za-z_][A-Za-z0-9_]*['"]\]/) ||
+      match(line, /os\.environ\.get\(['"][A-Za-z_][A-Za-z0-9_]*['"]/) ||
+      match(line, /os\.getenv\(['"][A-Za-z_][A-Za-z0-9_]*['"]/)) {
+    name = substr(line, RSTART, RLENGTH)
+    sub(/^[^'"]*['"]/, "", name); sub(/['"].*$/, "", name)
+    if (name != "" && !(name in seenenv)) { seenenv[name] = 1; printf "N|%s|env|%s|environment variable this script reads\n", TOOL, name }
+  }
+
+  # another program this script shells out to -- subprocess.*(...) with a
+  # literal command name, or os.system("cmd ..."). Emitted as a "C"
+  # candidate, same as the shell analyzer's, and filtered the same way by
+  # _static_analyze (a real `command -v` check, not a hardcoded list).
+  if (match(line, /subprocess\.(run|call|Popen|check_call|check_output)\(/)) {
+    rest = substr(line, RSTART + RLENGTH)
+    if (match(rest, /['"][-A-Za-z0-9_.\/]+['"]/)) {
+      cmd = substr(rest, RSTART + 1, RLENGTH - 2)
+      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s\n", TOOL, cmd }
+    }
+  } else if (match(line, /os\.system\(['"]/)) {
+    rest = line; sub(/^.*os\.system\(['"]/, "", rest)
+    if (match(rest, /^[-A-Za-z0-9_.\/]+/)) {
+      cmd = substr(rest, RSTART, RLENGTH)
+      if (cmd != "" && !(cmd in seencand)) { seencand[cmd] = 1; printf "C|%s|%s\n", TOOL, cmd }
     }
   }
 }
@@ -642,11 +740,34 @@ cat <<'AWKEOF'
 AWKEOF
 }
 
+# a raw "C|tool|name" candidate (see _analyze_sh_awk/_analyze_python_awk)
+# means "this line looked like it invokes something named NAME" -- turned
+# into a real, visible "N|invokes" row only if NAME is an ACTUAL program
+# on this system ($PATH, checked here, once, for real -- never a hardcoded
+# list of tool names). A candidate that's really a call to a function the
+# same script defines (the overwhelmingly common false-positive: a case
+# branch or plain statement just invoking a helper) simply won't resolve
+# and gets silently dropped, no different from --help parsing silently
+# finding nothing on a line it can't make sense of.
+_filter_invoked_candidates() {  # rows on stdin -> same rows, C -> verified N|invokes or dropped
+  local line tool name
+  while IFS= read -r line; do
+    case "$line" in
+      C\|*)
+        tool="${line#C|}"; tool="${tool%%|*}"
+        name="${line##*|}"
+        command -v "$name" >/dev/null 2>&1 && printf 'N|%s|invokes|%s|tool invoked by this script\n' "$tool" "$name"
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+}
+
 _static_analyze() {  # $1=tool $2=path $3=kind -> N/F/S rows on stdout
   local tool="$1" path="$2" kind="$3"
   case "$kind" in
-    sh)         awk -v TOOL="$tool" "$(_analyze_sh_awk)" "$path" 2>/dev/null ;;
-    python)     awk -v TOOL="$tool" "$(_analyze_python_awk)" "$path" 2>/dev/null ;;
+    sh)         awk -v TOOL="$tool" "$(_analyze_sh_awk)" "$path" "$path" 2>/dev/null | _filter_invoked_candidates ;;
+    python)     awk -v TOOL="$tool" "$(_analyze_python_awk)" "$path" 2>/dev/null | _filter_invoked_candidates ;;
     make)       awk -v TOOL="$tool" "$(_analyze_make_awk)" "$path" 2>/dev/null ;;
     ruby|perl|powershell)
                 awk -v TOOL="$tool" -v KIND="$kind" "$(_analyze_misc_awk)" "$path" 2>/dev/null ;;
