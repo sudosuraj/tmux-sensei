@@ -199,6 +199,35 @@ parser.add_argument("--files", nargs="+")
 EOF
 chmod +x "$WORK/bin/pyvaluetool"
 
+# ── fixture: click command group, interpreter deliberately missing (same
+# reasoning as pyvaluetool above -- forces every result through static
+# analysis, not a real --help run) ─────────────────────────────────────────
+cat > "$WORK/bin/clicktool" <<'EOF'
+#!/usr/bin/env python3-notreal
+import click
+
+@click.group()
+def cli():
+    pass
+
+@cli.command()
+@click.option("--target")
+def scan(target):
+    pass
+
+@cli.command()
+@click.option(
+    "--output",
+    type=click.Choice(["json", "csv", "xml"])
+)
+def report(output):
+    pass
+
+if __name__ == "__main__":
+    cli()
+EOF
+chmod +x "$WORK/bin/clicktool"
+
 rm -rf "$SENSEI_SPEC_CACHE"
 
 printf '\n1. Nested bash case scoping does not leak\n'
@@ -320,6 +349,28 @@ pv_complete="$("$SENSEI" complete 2 pyvaluetool --output "" 2>&1)"
 assert_contains "Tab-completion after --output offers json from the structured enum" "$pv_complete" 'json'
 assert_contains "Tab-completion after --output offers csv from the structured enum" "$pv_complete" 'csv'
 assert_contains "Tab-completion after --output offers xml from the structured enum" "$pv_complete" 'xml'
+
+printf '\n11. Click command groups: real, scoped subcommands (not a Click-specific path)\n'
+click_scan="$("$SENSEI" args clicktool scan 2>&1)"
+click_report="$("$SENSEI" args clicktool report 2>&1)"
+assert_contains     "click scan shows --target"                       "$click_scan"   '--target'
+assert_not_contains "click scan does NOT show --output (report-only)" "$click_scan"   '--output'
+assert_contains     "click report shows --output"                     "$click_report" '--output'
+assert_not_contains "click report does NOT show --target (scan-only)" "$click_report" '--target'
+assert_contains     "click report --output enum uses type=click.Choice(...)" \
+  "$("$SENSEI" args clicktool report --output 2>&1)" 'json, csv, xml'
+click_scan_complete="$("$SENSEI" complete 2 clicktool scan "" 2>&1)"
+click_report_complete="$("$SENSEI" complete 2 clicktool report "" 2>&1)"
+assert_contains     "Tab-completion: clicktool scan offers --target"  "$click_scan_complete"   '--target'
+assert_not_contains "Tab-completion: clicktool scan does NOT offer --output" "$click_scan_complete" '--output'
+assert_contains     "Tab-completion: clicktool report offers --output" "$click_report_complete" '--output'
+assert_not_contains "Tab-completion: clicktool report does NOT offer --target" "$click_report_complete" '--target'
+
+printf '\n12. Function/alias names never masquerade as flags or subcommand tokens\n'
+assert_not_contains "clicktool scan does NOT list its own handler function as a candidate" "$click_scan_complete" 'func'
+assert_not_contains "clicktool report does NOT list its own handler function as a candidate" "$click_report_complete" 'func'
+discover_func="$("$SENSEI" discover scan "$WORK/bin/clicktool" 2>&1)"
+assert_contains "sensei discover (structural search) still finds the scan() function" "$discover_func" 'func'
 
 echo
 if [ "$fail" -eq 0 ]; then

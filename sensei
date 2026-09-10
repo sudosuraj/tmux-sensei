@@ -883,6 +883,26 @@ function emitn(kind, name, desc, conf) {
     }
   }
 
+  # click command groups: `@cli.command()` (any group INSTANCE, never the
+  # `click` module itself -- that's a plain @click.command() single-command
+  # script, not a group member) marks the NEXT `def name(...):` as a real
+  # subcommand of that group. The `@click.option(...)` decorators in between
+  # belong to that subcommand too, but its own name isn't known until the
+  # `def` line is reached (Click defaults it to the function name, hyphens
+  # for underscores, unless overridden by command(name="...")) -- so options
+  # seen while a command decorator is pending are buffered here and only
+  # turned into real, scoped F rows once the def line resolves the name,
+  # mirroring the "gather evidence from the body, emit once scope is known"
+  # pattern already used for shell case arms and getopts.
+  if (match(line, /^[ \t]*@[A-Za-z_][A-Za-z0-9_]*\.command\(/) && line !~ /^[ \t]*@click\.command\(/) {
+    click_pending = 1; click_pending_name = ""
+    delete click_opt_flags; delete click_opt_value; delete click_opt_desc; delete click_opt_enum; click_opt_n = 0
+    if (match(line, /name[ \t]*=[ \t]*['"][A-Za-z0-9_-]+['"]/)) {
+      seg = substr(line, RSTART, RLENGTH); sub(/^name[ \t]*=[ \t]*['"]/, "", seg); sub(/['"]$/, "", seg)
+      click_pending_name = seg
+    }
+  }
+
   if (match(line, /add_argument\(/) || match(line, /click\.option\(/)) {
     # which parser variable is .add_argument being called on? A known
     # subparser variable scopes this flag to that subcommand; anything
@@ -914,6 +934,20 @@ function emitn(kind, name, desc, conf) {
     if (match(line, /choices[ \t]*=[ \t]*[\[\(][^\]\)]*[\]\)]/)) {
       seg = substr(line, RSTART, RLENGTH)
       sub(/^choices[ \t]*=[ \t]*[\[\(]/, "", seg); sub(/[\]\)]$/, "", seg)
+      n = split(seg, parts, ",")
+      for (i = 1; i <= n; i++) {
+        v = parts[i]; gsub(/^[ \t]+|[ \t]+$/, "", v); gsub(/^['"]|['"]$/, "", v)
+        if (v != "") enumv = (enumv == "" ? v : enumv "," v)
+      }
+    # click's own idiom for the same thing is type=click.Choice([...])
+    # rather than argparse's choices= keyword -- same real enum, same
+    # confidence, just a different spelling this needs to recognize on
+    # its own rather than falling through to the generic type= handling
+    # below and reporting the literal string "click.Choice" as if it
+    # were a scalar type name.
+    } else if (match(line, /click\.Choice\([ \t]*[\[\(][^\]\)]*[\]\)]/)) {
+      seg = substr(line, RSTART, RLENGTH)
+      sub(/^click\.Choice\([ \t]*[\[\(]/, "", seg); sub(/[\]\)]$/, "", seg)
       n = split(seg, parts, ",")
       for (i = 1; i <= n; i++) {
         v = parts[i]; gsub(/^[ \t]+|[ \t]+$/, "", v); gsub(/^['"]|['"]$/, "", v)
@@ -971,14 +1005,40 @@ function emitn(kind, name, desc, conf) {
     d = (desc == "" ? "argument parsed by this script" : desc)
     if (defaultv != "") d = d " (default: " defaultv ")"
 
-    key = subscope "\t" flags
-    if (flags != "" && !(key in seenflag)) {
-      seenflag[key] = 1
-      emitf(subscope, flags, val, d, enumv, "high")
+    if (click_pending) {
+      if (flags != "") {
+        click_opt_n++
+        click_opt_flags[click_opt_n] = flags
+        click_opt_value[click_opt_n] = val
+        click_opt_desc[click_opt_n] = d
+        click_opt_enum[click_opt_n] = enumv
+      }
+    } else {
+      key = subscope "\t" flags
+      if (flags != "" && !(key in seenflag)) {
+        seenflag[key] = 1
+        emitf(subscope, flags, val, d, enumv, "high")
+      }
     }
   }
   if (match(line, /^def[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\(/)) {
     name = line; sub(/^def[ \t]+/, "", name); sub(/[ \t]*\(.*/, "", name)
+    if (click_pending) {
+      if (click_pending_name != "") { subname = click_pending_name }
+      else { subname = name; gsub(/_/, "-", subname) }
+      if (subname != "" && !(subname in seensub)) {
+        seensub[subname] = 1
+        printf "S|%s|%s|subcommand handled by this script's Click command group\n", TOOL, subname
+      }
+      for (ci = 1; ci <= click_opt_n; ci++) {
+        key = subname "\t" click_opt_flags[ci]
+        if (!(key in seenflag)) {
+          seenflag[key] = 1
+          emitf(subname, click_opt_flags[ci], click_opt_value[ci], click_opt_desc[ci], click_opt_enum[ci], "high")
+        }
+      }
+      click_pending = 0; click_opt_n = 0
+    }
     if (name != "" && substr(name, 1, 1) != "_" && !(name in seenfn)) {
       seenfn[name] = 1; emitn("func", name, "function defined in this script", "high")
     }
@@ -1346,15 +1406,25 @@ _spec_flag_value() {  # $1=tool $2=sub $3=flag -> "value<TAB>enum" if $3 is a kn
   _spec_blob_for "$1" "$2" | awk -F'|' -v f="$3" -v want="$2" '
     $1=="F" && ($3=="" || $3==want) { n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == f) { print $5"\t"$7; exit } }'
 }
-# static-analysis-derived functions/variables/targets/aliases/env-refs/
-# invoked-tools -- see the STATIC ANALYSIS section. Shaped IDENTICALLY to
-# _spec_flags_expanded's 7 tab fields (value always "-", enum always
-# empty) so callers can concatenate the two and feed both through the
-# exact same prefix/keyword matching and the exact same flags table, with
-# no separate code path to keep in sync -- one unified row shape,
-# regardless of which underlying record kind (F or N) it came from.
+# static-analysis-derived variables/targets/env-refs/invoked-tools -- see
+# the STATIC ANALYSIS section. Shaped IDENTICALLY to _spec_flags_expanded's
+# 7 tab fields (value always "-", enum always empty) so callers can
+# concatenate the two and feed both through the exact same prefix/keyword
+# matching and the exact same flags table, with no separate code path to
+# keep in sync -- one unified row shape, regardless of which underlying
+# record kind (F or N) it came from.
+#
+# "func" and "alias" are deliberately excluded here: a function or shell
+# alias defined INSIDE a script is never itself a token you'd type as one
+# of ITS arguments (the confusion is worst with Click, whose handler
+# function names routinely match the subcommand name exactly -- listing
+# "scan (func)" as a candidate right next to the real "scan" subcommand is
+# noise, not a suggestion). They're still real, useful facts about a
+# script's structure, so cmd_discover_path's keyword search (which exists
+# precisely to answer "does this file relate to X" from source, not "what
+# can I type next") surfaces them via _static_rows_unified, unfiltered.
 _spec_named() {  # $1=tool $2=sub(may be empty)
-  _spec_blob_for "$1" "$2" | awk -F'|' '$1=="N"{printf "%s\t-\t%s (%s)\t\t%s\t%s\t%s\n", $4, $5, $3, $6, $7, $8}'
+  _spec_blob_for "$1" "$2" | awk -F'|' '$1=="N" && $3!="func" && $3!="alias" {printf "%s\t-\t%s (%s)\t\t%s\t%s\t%s\n", $4, $5, $3, $6, $7, $8}'
 }
 
 # two shapes share this one entry point, disambiguated by whether the
